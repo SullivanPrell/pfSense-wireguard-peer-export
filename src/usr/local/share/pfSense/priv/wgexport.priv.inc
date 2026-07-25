@@ -15,6 +15,4 @@ $priv_list['page-vpn-wgsuite']['match'] = [
     'wgx/vpn_wg_setup.php*',
     'wgx/vpn_wg_audit.php*',
     'wgx/vpn_wg_credits.php*',
-    'wgx/vpn_wg_map.php*',
-    'wgx/vpn_wg_checkin.php*',
 ];

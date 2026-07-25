@@ -527,7 +527,6 @@ $tab_array[] = array(gettext("Dashboard"), true, "/wgx/vpn_wg_dashboard.php");
 $tab_array[] = array(gettext("Export"), false, "/wgx/vpn_wg_export.php");
 $tab_array[] = array(gettext("Setup"), false, "/wgx/vpn_wg_setup.php");
 $tab_array[] = array(gettext("Audit"), false, "/wgx/vpn_wg_audit.php");
-$tab_array[] = array(gettext("Map"), false, "/wgx/vpn_wg_map.php");
 display_top_tabs($tab_array);
 ?>
 
@@ -817,82 +816,6 @@ display_top_tabs($tab_array);
     </div>
     </div>
 
-    <?php
-    // GPS Check-In Links panel — variables needed
-    $dash_host      = $_SERVER['HTTP_HOST'] ?? 'localhost';
-    $dash_all_peers = wgx_get_config_array_dash('peer');
-    $dash_has_peers = false;
-    foreach ($dash_all_peers as $p) {
-        if (is_array($p) && !empty($p['wgx_checkin_token'])) {
-            $dash_has_peers = true;
-            break;
-        }
-    }
-    ?>
-
-    <div class="panel panel-default">
-    <div class="panel-heading">
-    <h2 class="panel-title"><i class="fa fa-map-marker text-success"></i> GPS Check-In Links</h2>
-    </div>
-    <div class="panel-body">
-    <?php if (!$dash_has_peers): ?>
-    <div class="alert alert-info">
-    No peers with check-in tokens found. Provision peers using the Export tool to generate GPS links.
-    </div>
-    <?php else: ?>
-    <p class="text-muted" style="margin-bottom:12px;">
-    Send each peer their personal link — it can be saved as a phone home screen shortcut.
-    A single tap securely logs their GPS location to the Map page, giving you a vital identity
-    verification layer: if a connection originates from an unusual IP, cross-reference the user's
-    physical coordinates to confirm the account hasn't been compromised.
-    </p>
-    <div class="table-responsive">
-    <table class="table table-striped table-hover">
-    <thead>
-    <tr>
-    <th>Peer</th>
-    <th>Tunnel</th>
-    <th>Check-In Link</th>
-    <th style="width:80px;"></th>
-    </tr>
-    </thead>
-    <tbody>
-    <?php foreach ($dash_all_peers as $sp):
-    if (!is_array($sp)) continue;
-    $sp_token = $sp['wgx_checkin_token'] ?? '';
-    if (empty($sp_token)) continue;
-    $sp_name  = htmlspecialchars($sp['descr'] ?? 'Unknown', ENT_QUOTES);
-    $sp_tun   = htmlspecialchars($sp['tun']   ?? '—',       ENT_QUOTES);
-    $sp_link  = 'https://' . $dash_host . '/wgx/vpn_wg_checkin.php?token=' . urlencode($sp_token);
-    ?>
-    <tr>
-    <td style="vertical-align:middle;"><strong><?= $sp_name ?></strong></td>
-    <td style="vertical-align:middle;"><?= $sp_tun ?></td>
-    <td style="vertical-align:middle;"><code style="word-break:break-all;"><?= htmlspecialchars($sp_link) ?></code></td>
-    <td style="vertical-align:middle; text-align:right;">
-    <div class="btn-group">
-    <button class="btn btn-xs btn-default"
-    onclick="navigator.clipboard.writeText('<?= htmlspecialchars($sp_link, ENT_QUOTES) ?>').then(function(){this.innerHTML='<i class=\'fa fa-check\'></i>';setTimeout(function(){document.activeElement.innerHTML='<i class=\'fa fa-copy\'></i>';},1500)}.bind(this))"
-    title="Copy link"><i class="fa fa-copy"></i>
-    </button>
-    <a href="<?= htmlspecialchars($sp_link) ?>" target="_blank" class="btn btn-xs btn-success" title="Open link">
-    <i class="fa fa-external-link"></i>
-    </a>
-    </div>
-    </td>
-    </tr>
-    <?php endforeach; ?>
-    </tbody>
-    </table>
-    </div>
-    <?php endif; ?>
-    <p class="text-muted" style="margin-top:8px; margin-bottom:0;">
-    <i class="fa fa-info-circle"></i>
-    Full GPS tracking setup (GPSLogger / iOS Shortcuts) is available on the check-in page itself.
-    Manage tokens and email links using the GPS action buttons on the <a href="/wgx/vpn_wg_export.php">Export</a> page.
-    </p>
-    </div>
-    </div>
     </div>
 
     <script>

@@ -26,7 +26,6 @@
 // Contains:
 //   - Package install / deinstall / upgrade hooks
 //   - Shared config helpers used across all WGX pages
-//   - GPS check-in token bootstrap
 // =========================================================================
 
 require_once("config.inc");
@@ -122,62 +121,6 @@ function wgx_get_tunnels(): array
 }
 
 // =========================================================================
-// GPS check-in token management
-// =========================================================================
-
-/**
- * Ensure every peer has a wgx_checkin_token.
- * Called on install and on each Export page load so new peers added via
- * the native WireGuard UI also get tokens automatically.
- *
- * Returns true if any tokens were generated (so callers can decide whether
- * to call write_config()).
- */
-function wgx_ensure_checkin_tokens(): bool
-{
-    $a_peers = config_get_path('installedpackages/wireguard/peers/item', []);
-    if (!is_array($a_peers) || empty($a_peers)) {
-        return false;
-    }
-
-    $changed = false;
-    foreach ($a_peers as &$peer) {
-        if (empty($peer['wgx_checkin_token'])) {
-            $peer['wgx_checkin_token'] = bin2hex(random_bytes(16));
-            $changed = true;
-        }
-    }
-    unset($peer);
-
-    if ($changed) {
-        config_set_path('installedpackages/wireguard/peers/item', $a_peers);
-    }
-
-    return $changed;
-}
-
-/**
- * Find a peer by their check-in token.
- * Returns the peer array or null.
- */
-function wgx_find_peer_by_token(string $token): ?array
-{
-    if (empty($token)) {
-        return null;
-    }
-    $a_peers = config_get_path('installedpackages/wireguard/peers/item', []);
-    if (!is_array($a_peers)) {
-        return null;
-    }
-    foreach ($a_peers as $peer) {
-        if (($peer['wgx_checkin_token'] ?? '') === $token) {
-            return $peer;
-        }
-    }
-    return null;
-}
-
-// =========================================================================
 // Cron helpers
 // =========================================================================
 
@@ -211,12 +154,6 @@ function wgx_install(): void
 
     // Register cron job
     wgx_configure_cron(true);
-
-    // Bootstrap tokens for any existing peers
-    $changed = wgx_ensure_checkin_tokens();
-    if ($changed) {
-        write_config("WG Suite: Generated GPS check-in tokens for existing peers");
-    }
 
     // Initialise default settings if not already present
     $settings = wgx_get_settings();

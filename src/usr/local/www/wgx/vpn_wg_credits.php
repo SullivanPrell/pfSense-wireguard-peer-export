@@ -31,7 +31,6 @@ $tab_array[] = array(gettext("Dashboard"), false, "/wgx/vpn_wg_dashboard.php");
 $tab_array[] = array(gettext("Export"), false, "/wgx/vpn_wg_export.php");
 $tab_array[] = array(gettext("Setup"), false, "/wgx/vpn_wg_setup.php");
 $tab_array[] = array(gettext("Audit"), false, "/wgx/vpn_wg_audit.php");
-$tab_array[] = array(gettext("Map"),     false, "/wgx/vpn_wg_map.php");
 $tab_array[] = array(gettext("Credits"), true,  "/wgx/vpn_wg_credits.php");
 display_top_tabs($tab_array);
 ?>

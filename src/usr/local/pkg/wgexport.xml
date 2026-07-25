@@ -60,16 +60,6 @@
             <descr>Allow access to WG Suite Credits</descr>
             <match>wgx/vpn_wg_credits.php*</match>
         </item>
-        <item>
-            <name>page-vpn-wgsuite-map</name>
-            <descr>Allow access to WG Suite World Map</descr>
-            <match>wgx/vpn_wg_map.php*</match>
-        </item>
-        <item>
-            <name>page-vpn-wgsuite-checkin</name>
-            <descr>Allow GPS check-in (no auth — token protected)</descr>
-            <match>wgx/vpn_wg_checkin.php*</match>
-        </item>
     </privileges>
     <menu>
         <name>WG Suite</name>

@@ -2780,106 +2780,6 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["action"])) {
         exit();
     }
 
-    // === Standalone: send GPS check-in link ===
-    if (
-        $_SERVER["REQUEST_METHOD"] === "POST" &&
-        ($_POST["action"] ?? "") === "send_checkin_link"
-    ) {
-        if (!csrf_check(false)) {
-            header("Content-Type: application/json");
-            echo json_encode(["success" => false, "message" => "CSRF failed"]);
-            exit();
-        }
-        $to = trim($_POST["email"] ?? "");
-        $link = trim($_POST["link"] ?? "");
-        $peer_name = str_replace(["\r", "\n"], " ", trim($_POST["peer_name"] ?? "Peer"));
-        if (!filter_var($to, FILTER_VALIDATE_EMAIL)) {
-            header("Content-Type: application/json");
-            echo json_encode([
-                "success" => false,
-                "message" => "Invalid email.",
-            ]);
-            exit();
-        }
-        if ($link === "" || !filter_var($link, FILTER_VALIDATE_URL) ||
-            !in_array(parse_url($link, PHP_URL_SCHEME), ["http", "https"], true)) {
-            header("Content-Type: application/json");
-            echo json_encode([
-                "success" => false,
-                "message" => "Invalid check-in link URL.",
-            ]);
-            exit();
-        }
-        if (!function_exists("send_smtp_message")) {
-            @include_once "/etc/inc/notify.inc";
-        }
-        $subject = "WireGuard GPS Check-In Link — {$peer_name}";
-        $body = "Hi {$peer_name},
-
-Tap the link below on your phone while connected to WireGuard:
-
-{$link}
-
-Save it as a home screen shortcut — no app required.
-";
-        $orig = config_get_path("notifications/smtp/notifyemailaddress", "");
-        config_set_path("notifications/smtp/notifyemailaddress", $to);
-        try {
-            $sent = send_smtp_message($body, $subject);
-        } finally {
-            // Always restore the system notify address, even if SMTP throws.
-            config_set_path("notifications/smtp/notifyemailaddress", $orig);
-        }
-        header("Content-Type: application/json");
-        echo json_encode(
-            $sent !== false
-                ? ["success" => true, "message" => "Link sent to {$to}."]
-                : [
-                    "success" => false,
-                    "message" =>
-                    "Send failed — check SMTP in System > Advanced > Notifications.",
-                ]
-        );
-        exit();
-    }
-    // === Standalone: regenerate check-in token ===
-    if (
-        $_SERVER["REQUEST_METHOD"] === "POST" &&
-        ($_POST["action"] ?? "") === "regenerate_checkin_token"
-    ) {
-        if (!csrf_check(false)) {
-            header("Content-Type: application/json");
-            echo json_encode(["success" => false, "message" => "CSRF failed"]);
-            exit();
-        }
-        $old_tok = trim($_POST["token"] ?? "");
-        $a_peers_r = wgx_get_config_array("peer");
-        $new_tok = bin2hex(random_bytes(16));
-        $found = false;
-        foreach ($a_peers_r as &$pr) {
-            $cur_tok = (string)($pr["wgx_checkin_token"] ?? "");
-            if ($cur_tok !== "" && $old_tok !== "" && hash_equals($cur_tok, $old_tok)) {
-                $pr["wgx_checkin_token"] = $new_tok;
-                $found = true;
-                break;
-            }
-        }
-        unset($pr);
-        if (!$found) {
-            header("Content-Type: application/json");
-            echo json_encode([
-                "success" => false,
-                "message" => "Peer not found.",
-            ]);
-            exit();
-        }
-        config_set_path("installedpackages/wireguard/peers/item", $a_peers_r);
-        write_config("WG Suite: Regenerated GPS check-in token");
-        header("Content-Type: application/json");
-        echo json_encode(["success" => true, "new_token" => $new_tok]);
-        exit();
-    }
-
     ob_start();
     try {
         // === 4.C. POST: derive_pub ===
@@ -4568,7 +4468,6 @@ Here is your WireGuard VPN configuration for: {$peer_name}
                 $new_peer["expire_time"] = time() + $expiry_days * 86400;
             }
             $new_peer["key_created"] = time();
-            $new_peer["wgx_checkin_token"] = bin2hex(random_bytes(16));
             // QR/conf download token — valid for 24 hours after provisioning
             $new_peer["wgx_conf_token"]   = bin2hex(random_bytes(16));
             $new_peer["wgx_conf_token_ts"] = time();
@@ -6194,7 +6093,6 @@ $tab_array[] = [gettext("Dashboard"), false, "/wgx/vpn_wg_dashboard.php"];
 $tab_array[] = [gettext("Export"), true, "/wgx/vpn_wg_export.php"];
 $tab_array[] = [gettext("Setup"), false, "/wgx/vpn_wg_setup.php"];
 $tab_array[] = [gettext("Audit"), false, "/wgx/vpn_wg_audit.php"];
-$tab_array[] = [gettext("Map"), false, "/wgx/vpn_wg_map.php"];
 display_top_tabs($tab_array);
 
 $a_peers = wgx_get_config_array("peer");
@@ -6237,20 +6135,6 @@ foreach ($a_peers as $p) {
 }
 sort($all_tags);
 
-// Ensure every peer has a GPS check-in token — generate in memory AND persist
-$_wgx_tok_changed = false;
-foreach ($a_peers as &$_wgx_p) {
-    if (empty($_wgx_p["wgx_checkin_token"])) {
-        $_wgx_p["wgx_checkin_token"] = bin2hex(random_bytes(16));
-        $_wgx_tok_changed = true;
-    }
-}
-unset($_wgx_p);
-if ($_wgx_tok_changed) {
-    config_set_path("installedpackages/wireguard/peers/item", $a_peers);
-    write_config("WG Suite: Generated missing GPS check-in tokens");
-}
-unset($_wgx_tok_changed);
 // Sort peers by Assigned IPv4 address while preserving the original config index for UI actions
 uasort($a_peers, function ($a, $b) {
     $get_ip_val = function ($p) {
@@ -6841,9 +6725,6 @@ then come back here to provision peers.
                                 $json_tun = htmlspecialchars(json_encode(
                                     $peer["tun"] ?? "Unknown"
                                 ), ENT_QUOTES, 'UTF-8');
-                                $json_token = htmlspecialchars(json_encode(
-                                    $peer["wgx_checkin_token"] ?? ""
-                                ), ENT_QUOTES, 'UTF-8');
                                 $json_email = htmlspecialchars(json_encode(
                                     $peer["wgx_email"] ?? ""
                                 ), ENT_QUOTES, 'UTF-8');
@@ -6893,7 +6774,6 @@ then come back here to provision peers.
                                     <button class="btn btn-xs btn-rot" onclick="rotateKeys(<?= $idx ?>, <?= $json_name ?>)" title="Rotate Keys"><i class="fa fa-refresh"></i></button>
                                     <button class="btn btn-xs btn-primary" onclick="openEmailModal(<?= $idx ?>, <?= $json_name ?>, <?= $json_email ?>)" title="Email Config"><i class="fa fa-envelope"></i></button>
                                     <button class="btn btn-xs btn-warning" onclick="killPeer(<?= $json_tun ?>, <?= $json_pubkey ?>)" title="Kill Connection"><i class="fa fa-bolt"></i></button>
-                                    <button class="btn btn-xs btn-success" onclick="openCheckinLink(<?= $json_token ?>, <?= $json_name ?>)" title="GPS Check-In Link"><i class="fa fa-map-marker"></i></button>
                                     <button class="btn btn-xs btn-default" onclick="pingPeer(<?= json_encode(implode(',', $ip_parts)) ?>, <?= $json_name ?>, this)" title="Ping Peer"><i class="fa fa-wifi"></i></button>
                                     <button class="btn btn-xs btn-default" onclick="wgxOpenDoctor(<?= $idx ?>, <?= $json_name ?>)" title="Connectivity Doctor"><i class="fa fa-stethoscope"></i></button>
                                     <button class="btn btn-xs btn-danger" onclick="deletePeer(<?= $idx ?>, <?= $json_name ?>)" title="Delete Peer"><i class="fa fa-trash"></i></button>
@@ -6925,12 +6805,6 @@ then come back here to provision peers.
         <small class="text-muted">WG Suite v<?= WGX_VERSION ?> &nbsp;|&nbsp; <a href="/wgx/vpn_wg_credits.php" class="text-info" style="text-decoration: none;"><i class="fa fa-star text-warning"></i> Credits</a></small>
     </div>
 </div>
-
-<?php
-// ── GPS Check-In Quick Reference ──────────────────────────────────────────
-$host = $_SERVER['HTTP_HOST'] ?? 'your-pfsense';
-$has_peers = !empty($a_peers);
-?>
 
 <?php
 // === WireGuard Status Panel Data ===
@@ -7716,60 +7590,6 @@ tr[class^='treegrid-parent-'] {
                             <ul class="list-unstyled" id="peerTimelineList"></ul>
                         </div>
                     </div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-default" data-dismiss="modal">Close</button>
-            </div>
-        </div>
-    </div>
-</div>
-<div class="modal fade" id="checkinLinkModal" tabindex="-1" role="dialog" data-backdrop="static">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <button class="close" data-dismiss="modal"><span>&times;</span></button>
-                <h4 class="modal-title"><i class="fa fa-map-marker text-success"></i> GPS Check-In Link &mdash; <span id="checkinPeerName"></span></h4>
-            </div>
-            <div class="modal-body">
-                <div class="alert alert-info">
-                    <i class="fa fa-info-circle"></i>
-                    Send this link to the peer. When visited on their phone while connected to WireGuard, one tap shares their GPS location with the Map page.
-                </div>
-                <div class="panel panel-default">
-                    <div class="panel-heading">
-                        <h3 class="panel-title"><i class="fa fa-share-alt"></i> Sharing Options</h3>
-                    </div>
-                    <div class="panel-body form-horizontal">
-                        <div class="form-group">
-                            <label class="col-sm-3 control-label">Check-In URL</label>
-                            <div class="col-sm-9">
-                                <div class="input-group">
-                                    <input type="text" id="checkinLinkInput" class="form-control" readonly style="font-family:monospace; font-size:12px;">
-                                    <span class="input-group-btn">
-                                        <button class="btn btn-default" id="checkinCopyBtn" onclick="copyCheckinLink()" title="Copy link"><i class="fa fa-copy"></i></button>
-                                    </span>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="form-group">
-                            <label class="col-sm-3 control-label">Send by Email</label>
-                            <div class="col-sm-9">
-                                <div class="input-group">
-                                    <span class="input-group-addon"><i class="fa fa-envelope"></i></span>
-                                    <input type="email" id="checkinEmailTarget" class="form-control" placeholder="peer@example.com">
-                                    <span class="input-group-btn">
-                                        <button class="btn btn-primary" id="checkinSendBtn" onclick="sendCheckinEmail()"><i class="fa fa-paper-plane"></i> Send</button>
-                                    </span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div id="checkinEmailStatus" style="display:none; margin-bottom:10px;"></div>
-                <div class="alert alert-warning" style="margin-bottom:0;">
-                    <i class="fa fa-info-circle"></i> Regenerating the token invalidates the old link immediately.
-                    <button class="btn btn-default btn-xs pull-right" onclick="regenerateCheckinToken()"><i class="fa fa-refresh"></i> Regenerate Token</button>
                 </div>
             </div>
             <div class="modal-footer">
@@ -10291,107 +10111,6 @@ tr[class^='treegrid-parent-'] {
                 loadEl.style.display = 'none';
                 errEl.textContent = 'Timeline load failed.';
                 errEl.style.display = '';
-            });
-    }
-
-    // ── GPS Check-In Link modal ──────────────────────────────────────────────
-    var checkinCurrentIdx = null;
-    var checkinCurrentName = null;
-
-    function openCheckinLink(token, name) {
-        if (!token) {
-            alert('No check-in token. Save the page and try again.');
-            return;
-        }
-        checkinCurrentIdx = token;
-        checkinCurrentName = name;
-        var link = window.location.protocol + '//' + window.location.host + '/wgx/vpn_wg_checkin.php?token=' + encodeURIComponent(token);
-        document.getElementById('checkinPeerName').textContent = name;
-        document.getElementById('checkinLinkInput').value = link;
-        document.getElementById('checkinEmailTarget').value = '';
-        document.getElementById('checkinEmailStatus').style.display = 'none';
-        document.getElementById('checkinCopyBtn').innerHTML = '<i class="fa fa-copy"></i>';
-        $('#checkinLinkModal').modal('show');
-    }
-
-    function copyCheckinLink() {
-        var input = document.getElementById('checkinLinkInput');
-        navigator.clipboard.writeText(input.value).then(function() {
-            var btn = document.getElementById('checkinCopyBtn');
-            btn.innerHTML = '<i class="fa fa-check"></i> Copied';
-            setTimeout(function() {
-                btn.innerHTML = '<i class="fa fa-copy"></i>';
-            }, 2000);
-        }).catch(function() {
-            input.select();
-            document.execCommand('copy');
-        });
-    }
-
-    function sendCheckinEmail() {
-        var to = document.getElementById('checkinEmailTarget').value.trim();
-        var link = document.getElementById('checkinLinkInput').value;
-        if (!to) {
-            alert('Enter an email address.');
-            return;
-        }
-        var btn = document.getElementById('checkinSendBtn');
-        btn.disabled = true;
-        btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Sending...';
-        var statusEl = document.getElementById('checkinEmailStatus');
-        statusEl.style.display = 'none';
-        var body = new URLSearchParams({
-            action: 'send_checkin_link',
-            email: to,
-            link: link,
-            peer_name: checkinCurrentName || '',
-            __csrf_magic: getCsrf()
-        });
-        fetch('/wgx/vpn_wg_export.php', {
-                method: 'POST',
-                body: body
-            })
-            .then(function(r) {
-                return r.json();
-            })
-            .then(function(data) {
-                statusEl.className = 'alert ' + (data.success ? 'alert-success' : 'alert-danger');
-                statusEl.textContent = data.message;
-                statusEl.style.display = '';
-                if (data.success) document.getElementById('checkinEmailTarget').value = '';
-            }).catch(function() {
-                statusEl.className = 'alert alert-danger';
-                statusEl.textContent = 'Request failed.';
-                statusEl.style.display = '';
-            }).finally(function() {
-                btn.disabled = false;
-                btn.innerHTML = '<i class="fa fa-paper-plane"></i> Send';
-            });
-    }
-
-    function regenerateCheckinToken() {
-        if (!confirm('Regenerate token? The old link stops working immediately.')) return;
-        var body = new FormData();
-        body.append('action', 'regenerate_checkin_token');
-        body.append('token', checkinCurrentIdx);
-        body.append('__csrf_magic', getCsrf());
-        fetch('/wgx/vpn_wg_export.php', {
-                method: 'POST',
-                body: body
-            })
-            .then(function(r) {
-                return r.json();
-            })
-            .then(function(data) {
-                if (data.success) {
-                    checkinCurrentIdx = data.new_token;
-                    var link = window.location.protocol + '//' + window.location.host + '/wgx/vpn_wg_checkin.php?token=' + encodeURIComponent(data.new_token);
-                    document.getElementById('checkinLinkInput').value = link;
-                    document.getElementById('checkinEmailStatus').style.display = 'none';
-                    alert('Token regenerated. Send the new link to the peer.');
-                } else {
-                    alert('Failed: ' + (data.message || 'Unknown error'));
-                }
             });
     }
 

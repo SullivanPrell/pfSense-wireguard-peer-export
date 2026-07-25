@@ -1420,7 +1420,6 @@ $tab_array[] = [gettext("Dashboard"), false, "/wgx/vpn_wg_dashboard.php"];
 $tab_array[] = [gettext("Export"),    false, "/wgx/vpn_wg_export.php"];
 $tab_array[] = [gettext("Setup"),     true,  "/wgx/vpn_wg_setup.php"];
 $tab_array[] = [gettext("Audit"),     false, "/wgx/vpn_wg_audit.php"];
-$tab_array[] = [gettext("Map"),       false, "/wgx/vpn_wg_map.php"];
 display_top_tabs($tab_array);
 
 if (isset($savemsg)) {

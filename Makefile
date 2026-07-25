@@ -7,7 +7,9 @@ PKG_NAME    := pfSense-pkg-wg-export
 PKG_VERSION := $(shell python3 -c "import json;print(json.load(open('pkg/metadata.json'))['version'])")
 PKG         := dist/$(PKG_NAME)-$(PKG_VERSION).pkg
 
-.PHONY: all build list verify lint clean help
+BASE_VERSION := 1.1.0
+
+.PHONY: all build list verify check lint clean help
 
 all: build
 
@@ -22,6 +24,12 @@ list:
 ## verify: confirm the built package matches the src/ tree
 verify: $(PKG)
 	@python3 build.py --verify $(PKG)
+
+## check: compare src/ structure against the upstream package it forked from
+check:
+	@base=$$(python3 tools/extract-upstream.py $(BASE_VERSION)); \
+	python3 tools/phpbalance.py --baseline $$base/usr/local src/usr/local; \
+	rc=$$?; rm -rf "$$base"; exit $$rc
 
 ## lint: PHP syntax-check every source file (requires php)
 lint:
