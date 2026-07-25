@@ -1,4 +1,23 @@
-# pfSense WireGuard Peer Export (WG Suite)
+# pfSense WireGuard Peer Export (WG Suite) — hardened fork
+
+> **This is a fork of [3um3le3ee/pfSense-wireguard-peer-export](https://github.com/3um3le3ee/pfSense-wireguard-peer-export), rebuilt from source with security fixes.**
+>
+> Upstream ships compiled `.pkg` binaries with the source deleted from the
+> repository. Those binaries were extracted, audited, and committed here as
+> readable source that you build yourself.
+>
+> **Upstream 1.0.8 and 1.0.9 install a remote-controlled auto-installer** that
+> runs as root at every boot and survives pfSense upgrades. Do not install
+> them. If you already have, run `sh audit.sh` — installing this fork does not
+> remove it.
+>
+> Relative to upstream 1.1.0 this fork removes the GPS location tracker, the
+> unauthenticated WebSocket-to-WireGuard bridge, and moves the privileged cron
+> script out of the web root. Read **[SECURITY.md](SECURITY.md)** before
+> installing — it documents every finding and every change.
+>
+> Sections below marked *(removed in this fork)* describe upstream behaviour
+> that is no longer present.
 
 One click to add a peer, get the `.conf` file, and generate a QR code. No more configuring both sides manually.
 
@@ -117,25 +136,54 @@ Previous versions computed IP capacity and usage incorrectly: `used_ips` increme
 
 ## 🚀 Quick Start
 
-### Package Installation
+### Build from source
 
-SSH into pfSense (option 8 for shell) and run:
+This fork does not publish binaries. You build the package yourself from the
+source in `src/`, so what you install is what you can read. `build.py` uses
+only the Python standard library, so this works on macOS and Linux as well as
+FreeBSD.
 
-**1. Download the package**
+**1. Build the package**
 ```bash
-curl -LO https://github.com/3um3le3ee/pfSense-wireguard-peer-export/releases/latest/download/pfSense-pkg-wg-export-1.1.0.pkg
+make build
 ```
 
-**2. Install the package**
+**2. Confirm the package matches the source tree**
 ```bash
-pkg add -fM pfSense-pkg-wg-export-1.1.0.pkg
+make verify
 ```
+
+**3. Copy it to the firewall**
+```bash
+scp dist/pfSense-pkg-wg-export-1.1.0.pkg root@192.168.1.1:/tmp/
+```
+
+**4. Install it** — SSH into pfSense (option 8 for a shell) and run:
+```bash
+pkg add -fM /tmp/pfSense-pkg-wg-export-1.1.0.pkg
+```
+
+Builds are byte-reproducible, so two people building the same commit get the
+same `sha256`. Check yours against anyone else's before trusting a package you
+did not build.
 
 ### Uninstall
 
 ```bash
 pkg delete pfSense-pkg-wg-export
 ```
+
+### If you have ever installed upstream 1.0.8 or 1.0.9
+
+Those releases write a root command into `config.xml` that re-installs a
+package from a third-party URL at every boot, and it survives pfSense
+upgrades. Installing this fork does **not** remove it. Check for it:
+
+```bash
+sh audit.sh
+```
+
+Section 6 reports it and gives removal instructions. See [SECURITY.md](SECURITY.md#2-critical-remote-controlled-auto-installer-in-108-and-109).
 
 ---
 
@@ -233,12 +281,12 @@ The peer list shows tunnel, public key, allowed IPs, live status, and Rx/Tx usag
 - **NEW** NOC Dashboard: Top Talkers (24h) — top 5 peers by traffic, computed server-side from the telemetry archive with reset-aware delta calculation. Medal icons for the top three.
 - **NEW** NOC Dashboard: Country Distribution — peer country chips from the geo cache.
 
-#### Peer Location Map
+#### Peer Location Map *(removed in this fork — see SECURITY.md)*
 - **NEW** Live world map (OpenStreetMap tiles via Leaflet.js, loaded locally) showing a marker for every peer that has a recorded endpoint IP. Clicking a marker opens a popup with the peer name, tunnel, last-seen time, and a GPS link so admins can quickly query connections from unexpected locations.
 - Markers reflect where each peer's traffic *enters* the internet, not the peer's physical device location: peers on mobile data show their carrier's regional gateway IP; peers on home WiFi show the household WAN IP (because they share the home internet connection). The popup makes this distinction clear so admins interpret the map correctly.
 - Admin GPS links open the coordinates in the system default mapping app for quick cross-reference against known peer locations.
 
-#### WebSocket Transport (Advanced)
+#### WebSocket Transport (Advanced) *(removed in this fork — see SECURITY.md)*
 - **NEW** WireGuard UDP over WebSocket — tunnels WireGuard traffic inside a standard WebSocket connection on TCP port 443, making it indistinguishable from HTTPS to deep-packet inspection. Defeats networks and firewalls that block UDP, block non-HTTP ports, or actively identify and drop WireGuard handshakes (common on corporate networks, hotels, carrier-grade NAT, and some countries' national filtering infrastructure).
 - Configured per-tunnel in the WG Suite UI; the `wg_ws_server` daemon handles the server-side WebSocket-to-UDP relay. Peers download a WebSocket-aware client bundle instead of a standard `.conf`.
 - v1.1.0 hardens the WS bundle download (replaced `form.submit()` with `fetch()` + blob), fixes WireGuard routing loops caused by the tunnel daemon's own TCP connection being captured by `AllowedIPs = 0.0.0.0/0` (resolved via host-route pinning in `start.sh`), and adds WebSocket Ping/Pong frame handling for connection keepalive on restrictive middleboxes.
