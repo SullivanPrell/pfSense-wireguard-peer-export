@@ -260,325 +260,6 @@ if (!empty($used_v6)) {
     }
 }
 
-// === 6.B.0 WebSocket Server Auto-Deploy ===
-
-/**
- * Deploys the WebSocket-to-WireGuard bridge server on this pfSense box.
- * Called automatically when a tunnel is created with WebSocket transport enabled.
- * Returns an array of ['ok'=>bool, 'msg'=>string] status messages.
- */
-function wgx_deploy_ws_server(int $wg_port, int $new_webui_port, string $tun_iface = ''): array
-{
-    $steps = [];
-    $tunnel_dir  = '/usr/local/www/wgx/tunnel';
-    $server_file = "{$tunnel_dir}/wg_ws_server.php";
-    $rc_file     = '/usr/local/etc/rc.d/wg_ws_server';
-    $cert_dir    = '/usr/local/etc/wg_ws';
-    $cert_pem    = $cert_dir . '/server.pem';
-    $log_file    = '/var/log/wg_ws_server.log';
-
-    // Ensure the cert directory exists with tight permissions
-    if (!is_dir($cert_dir)) {
-        mkdir($cert_dir, 0700, true);
-    }
-
-    // ----------------------------------------------------------------
-    // Step 1: Export the current web UI cert to a PEM file
-    // ----------------------------------------------------------------
-    $step = ['label' => 'Export TLS certificate'];
-    try {
-        global $config;
-        $ref  = $config['system']['webgui']['ssl-certref'] ?? '';
-        $cert = $ref ? lookup_cert($ref) : null;
-        if ($cert && !empty($cert['crt']) && !empty($cert['prv'])) {
-            $pem = base64_decode($cert['crt']) . base64_decode($cert['prv']);
-            file_put_contents($cert_pem, $pem);
-            chmod($cert_pem, 0600);
-            $step['ok']  = true;
-            $step['msg'] = "Certificate exported to {$cert_pem}";
-        } else {
-            // No custom cert — generate a self-signed one via openssl
-            $subj = '/C=US/ST=Local/L=Local/O=WGSuite/CN=pfSense-WGX';
-            $cmd  = 'openssl req -x509 -newkey rsa:4096'
-                  . ' -keyout ' . escapeshellarg($cert_pem)
-                  . ' -out '    . escapeshellarg($cert_pem)
-                  . ' -days 3650 -nodes'
-                  . ' -subj '   . escapeshellarg($subj)
-                  . ' 2>/dev/null';
-            exec($cmd);
-            chmod($cert_pem, 0600);
-            $step['ok']  = file_exists($cert_pem);
-            $step['msg'] = $step['ok']
-            ? "Self-signed certificate generated at {$cert_pem}"
-            : "Could not generate certificate — install openssl or add a cert in System > Cert Manager";
-        }
-    } catch (\Throwable $e) {
-        $step['ok']  = false;
-        $step['msg'] = 'Certificate export failed: ' . $e->getMessage();
-    }
-    $steps[] = $step;
-    if (!$step['ok']) return $steps;
-
-    // ----------------------------------------------------------------
-    // Step 2: Move the web UI off port 443 (if it is still on 443)
-    // ----------------------------------------------------------------
-    $step = ['label' => 'Move web UI off port 443'];
-    $current_port = (int)($config['system']['webgui']['port'] ?? 443);
-    if ($current_port === 443 || $current_port === 0) {
-        config_set_path('system/webgui/port', (string)$new_webui_port);
-        // Do NOT restart the web UI here — the on-disk config still has
-        // the OLD port (write_config runs later) so restarting now would
-        // just re-bind the old port and lose the change. The caller flushes
-        // the HTTP response first, then write_configs and restarts webgui
-        // in a shutdown handler so the client never sees the disconnect.
-        $GLOBALS['wgx_webgui_restart_needed'] = true;
-        $GLOBALS['wgx_new_webui_port']        = (int)$new_webui_port;
-        $step['ok']  = true;
-        $step['msg'] = "Web UI moved to port {$new_webui_port}. "
-        . "Access pfSense at https://&lt;ip&gt;:{$new_webui_port} after this.";
-    } else {
-        $step['ok']  = true;
-        $step['msg'] = "Web UI is already on port {$current_port} — no change needed.";
-    }
-    $steps[] = $step;
-
-    // ----------------------------------------------------------------
-    // Step 3: Ensure server PHP file is in place
-    // ----------------------------------------------------------------
-    $step = ['label' => 'Verify server file'];
-    if (!file_exists($server_file)) {
-        $step['ok']  = false;
-        $step['msg'] = "Server file not found at {$server_file}. "
-        . "Ensure the package was installed correctly (pkg add).";
-    } else {
-        $step['ok']  = true;
-        $step['msg'] = "Server file confirmed at {$server_file}";
-    }
-    $steps[] = $step;
-    if (!$step['ok']) return $steps;
-
-    // ----------------------------------------------------------------
-    // Step 4: Install rc.d script
-    // ----------------------------------------------------------------
-    $step = ['label' => 'Install rc.d startup script'];
-    $rc_src = "{$tunnel_dir}/wg_ws_server_rc.sh";
-    if (file_exists($rc_src)) {
-        copy($rc_src, $rc_file);
-        chmod($rc_file, 0755);
-        // Write config to /etc/rc.conf.local so it survives reboots
-        $rc_conf = '/etc/rc.conf.local';
-        $current = file_exists($rc_conf) ? file_get_contents($rc_conf) : '';
-        // Always rewrite to ensure cert path and ports are correct
-        $rc_new = preg_replace('/\n?wg_ws_server_[^\n]+/m', '', $current);
-        $rc_content = rtrim($rc_new) . "\n"
-            . "wg_ws_server_enable=\"YES\"\n"
-            . "wg_ws_server_cert=\"{$cert_pem}\"\n"
-            . "wg_ws_server_wg_port=\"{$wg_port}\"\n"
-            . "wg_ws_server_port=\"443\"\n"
-            . "wg_ws_server_path=\"/tunnel\"\n";
-        file_put_contents($rc_conf, $rc_content, LOCK_EX);
-        // Verify the write succeeded
-        $verify = file_exists($rc_conf) ? file_get_contents($rc_conf) : '';
-        $write_ok = strpos($verify, 'wg_ws_server_enable="YES"') !== false;
-        $step['ok']  = $write_ok;
-        $step['msg'] = $write_ok
-            ? "rc.d script installed at {$rc_file} — enabled at boot via /etc/rc.conf.local"
-            : "rc.d script installed but could not write /etc/rc.conf.local — run: echo 'wg_ws_server_enable=\"YES\"' >> /etc/rc.conf.local";
-    } else {
-        // rc.d script missing from package — write the full production version inline
-        $inline_rc = <<<'SH'
-#!/bin/sh
-# PROVIDE: wg_ws_server
-# REQUIRE: wireguard LOGIN
-# KEYWORD: shutdown
-. /etc/rc.subr
-name="wg_ws_server"
-rcvar="${name}_enable"
-: ${wg_ws_server_enable:="NO"}
-: ${wg_ws_server_cert:="/usr/local/etc/wg_ws/server.pem"}
-: ${wg_ws_server_port:="443"}
-: ${wg_ws_server_path:="/tunnel"}
-: ${wg_ws_server_wg_port:="51820"}
-: ${wg_ws_server_log:="/var/log/wg_ws_server.log"}
-command="/usr/local/bin/php"
-command_args="/usr/local/www/wgx/tunnel/wg_ws_server.php"
-pidfile="/var/run/${name}.pid"
-start_cmd="${name}_start"
-stop_cmd="${name}_stop"
-status_cmd="${name}_status"
-wg_ws_server_start() {
-    if [ -f "${pidfile}" ] && kill -0 $(cat "${pidfile}") 2>/dev/null; then
-        echo "${name} is already running."; return 1; fi
-    if [ ! -f "${wg_ws_server_cert}" ]; then
-        echo "ERROR: Certificate not found: ${wg_ws_server_cert}"; return 1; fi
-    echo "Starting ${name}..."
-    export WG_WS_CERT="${wg_ws_server_cert}"
-    export WG_WS_PORT="${wg_ws_server_port}"
-    export WG_WS_PATH="${wg_ws_server_path}"
-    export WG_WG_PORT="${wg_ws_server_wg_port}"
-    /usr/local/bin/php ${command_args} >> "${wg_ws_server_log}" 2>&1 &
-    echo $! > "${pidfile}"
-    echo "${name} started (pid $(cat ${pidfile}))"
-}
-wg_ws_server_stop() {
-    if [ ! -f "${pidfile}" ]; then echo "${name} is not running."; return 0; fi
-    pid=$(cat "${pidfile}")
-    if ! kill -0 "${pid}" 2>/dev/null; then rm -f "${pidfile}"; return 0; fi
-    echo "Stopping ${name} (pid ${pid})..."
-    kill -TERM "${pid}"
-    i=0; while kill -0 "${pid}" 2>/dev/null && [ $i -lt 10 ]; do sleep 0.5; i=$((i+1)); done
-    kill -0 "${pid}" 2>/dev/null && kill -KILL "${pid}"
-    rm -f "${pidfile}"; echo "${name} stopped."
-}
-wg_ws_server_status() {
-    if [ -f "${pidfile}" ] && kill -0 $(cat "${pidfile}") 2>/dev/null; then
-        echo "${name} is running (pid $(cat ${pidfile}))."
-        echo "Last 5 log lines:"; tail -5 "${wg_ws_server_log}" 2>/dev/null
-    else echo "${name} is NOT running."; fi
-}
-load_rc_config $name
-run_rc_command "$1"
-SH;
-        file_put_contents($rc_file, $inline_rc);
-        chmod($rc_file, 0755);
-        // Also write rc.conf.local for this path
-        $rc_conf2 = '/etc/rc.conf.local';
-        $cur2 = file_exists($rc_conf2) ? file_get_contents($rc_conf2) : '';
-        $cur2 = preg_replace('/\n?wg_ws_server_[^\n]+/m', '', $cur2);
-        file_put_contents($rc_conf2,
-            rtrim($cur2) . "\n"
-            . "wg_ws_server_enable=\"YES\"\n"
-            . "wg_ws_server_cert=\"{$cert_pem}\"\n"
-            . "wg_ws_server_wg_port=\"{$wg_port}\"\n"
-            . "wg_ws_server_port=\"443\"\n"
-            . "wg_ws_server_path=\"/tunnel\"\n",
-            LOCK_EX
-        );
-        $step['ok']  = true;
-        $step['msg'] = "rc.d script written at {$rc_file} (full production version) — enabled at boot";
-    }
-    $steps[] = $step;
-
-    // ----------------------------------------------------------------
-    // Step 5: Start the server via rc.d (clean, boot-safe, env from rc.conf.local)
-    // ----------------------------------------------------------------
-    $step    = ['label' => 'Start WebSocket server'];
-    $pid_file = '/var/run/wg_ws_server.pid';
-    $already  = false;
-
-    // Stop any existing instance cleanly before starting fresh
-    if (file_exists($pid_file)) {
-        $pid = (int)trim(file_get_contents($pid_file));
-        if ($pid > 0) {
-            @posix_kill($pid, SIGTERM);
-            sleep(2);
-            @unlink($pid_file);
-            $already = true;
-        }
-    }
-
-    // Start the server directly with explicit env vars — avoids rc.conf.local race conditions
-    // Set env vars via putenv so they are visible to the child process
-    putenv("WG_WS_CERT={$cert_pem}");
-    putenv("WG_WS_PORT=443");
-    putenv("WG_WS_PATH=/tunnel");
-    putenv("WG_WG_PORT={$wg_port}");
-
-    // Launch in background, capture PID
-    $cmd = '/usr/local/bin/php ' . escapeshellarg($server_file)
-         . ' >> ' . escapeshellarg($log_file) . ' 2>&1 & echo $!';
-    exec($cmd, $pid_out);
-    $new_pid = (int)trim(implode('', $pid_out));
-
-    if ($new_pid > 0) {
-        file_put_contents($pid_file, (string)$new_pid);
-    }
-
-    // Give the server up to 8 seconds to bind port 443
-    $ws_listen_port = 443;
-    $probe_ok  = false;
-    $deadline  = time() + 8;
-    while (time() < $deadline) {
-        $probe = @fsockopen('127.0.0.1', $ws_listen_port, $pe, $ps, 1);
-        if ($probe) { fclose($probe); $probe_ok = true; break; }
-        usleep(500000);
-    }
-
-    if ($probe_ok && $new_pid > 0) {
-        syslog(LOG_NOTICE, "WG Suite: WebSocket server started (pid {$new_pid}) on port {$ws_listen_port}");
-        wgx_audit_log("Deployed WebSocket transport server (pid {$new_pid}) on port {$ws_listen_port}");
-        $step['ok']  = true;
-        $step['msg'] = ($already ? 'Restarted' : 'Started')
-            . " WebSocket server (pid {$new_pid}), confirmed listening on port {$ws_listen_port}."
-            . " TLS cert: {$cert_pem}.";
-    } elseif ($new_pid > 0 && !$probe_ok) {
-        // Process started but not listening — show last log lines for diagnosis
-        $last_log = '';
-        if (file_exists($log_file)) {
-            $log_lines_tail = array_slice(file($log_file), -5);
-            $last_log = ' Last log: ' . trim(implode(' | ', array_map('trim', $log_lines_tail)));
-        }
-        $step['ok']  = false;
-        $step['msg'] = "Server process started (pid {$new_pid}) but is not listening on port {$ws_listen_port}."
-            . " Port 443 may still be in use by another process (run: sockstat -l | grep :443 on pfSense)."
-            . $last_log;
-    } else {
-        $last_log = '';
-        if (file_exists($log_file)) {
-            $log_lines_tail = array_slice(file($log_file), -5);
-            $last_log = ' Last log: ' . trim(implode(' | ', array_map('trim', $log_lines_tail)));
-        }
-        $step['ok']  = false;
-        $step['msg'] = "Server did not start. Check {$log_file} for details.{$last_log}";
-    }
-    $steps[] = $step;
-
-    // ----------------------------------------------------------------
-    // Step 6: Add WAN firewall rule for TCP 443
-    // ----------------------------------------------------------------
-    $step = ['label' => 'Add WAN firewall rule for TCP 443'];
-    $filter_rules = config_get_path('filter/rule', []);
-    if (!is_array($filter_rules)) $filter_rules = [];
-    if (!empty($filter_rules) && !isset($filter_rules[0])) {
-        $filter_rules = [$filter_rules];
-    }
-
-    // Check if the rule already exists
-    $rule_exists = false;
-    foreach ($filter_rules as $r) {
-        if (($r['interface'] ?? '') === 'wan'
-            && ($r['protocol'] ?? '') === 'tcp'
-            && ($r['destination']['port'] ?? '') === '443'
-            && ($r['destination']['network'] ?? '') === '(self)'
-        ) {
-            $rule_exists = true;
-            break;
-        }
-    }
-
-    if (!$rule_exists) {
-        $filter_rules[] = [
-            'type'        => 'pass',
-            'interface'   => 'wan',
-            'ipprotocol'  => 'inet46',
-            'statetype'   => 'keep state',
-            'protocol'    => 'tcp',
-            'source'      => ['any' => true],
-            'destination' => ['network' => '(self)', 'port' => '443'],
-            'descr'       => 'WG Suite: Allow WebSocket transport (TCP 443)',
-            'created'     => function_exists('make_config_revision_entry') ? make_config_revision_entry() : [],
-        ];
-        config_set_path('filter/rule', $filter_rules);
-        $step['ok']  = true;
-        $step['msg'] = 'Firewall rule queued — TCP 443 inbound on WAN allowed';
-    } else {
-        $step['ok']  = true;
-        $step['msg'] = 'Firewall rule for TCP 443 already exists — no change';
-    }
-    $steps[] = $step;
-
-    return $steps;
-}
 
 // === [DEV-ONLY] 6.B.NUKE — Full WGX Reset ===
 // Gated by WGX_DEV_MODE constant — never active in production builds.
@@ -661,7 +342,7 @@ if (defined('WGX_DEV_MODE') && WGX_DEV_MODE && $_POST && isset($_POST['nuke_all'
     $kept_rules = [];
     foreach ($filter_rules as $r) {
         $descr = $r['descr'] ?? '';
-        // Match rules created by WG Suite deploy or WebSocket deploy
+        // Match rules created by WG Suite deploy
         if (
             strpos($descr, 'WG Suite') !== false
             || strpos($descr, 'Allow WireGuard') !== false
@@ -703,12 +384,6 @@ if (defined('WGX_DEV_MODE') && WGX_DEV_MODE && $_POST && isset($_POST['nuke_all'
     }
     config_set_path('installedpackages/wireguard/tunnels/item', []);
     $nuke_log[] = "Removed {$tunnel_count} tunnel(s) and {$peer_count} peer(s) from config";
-
-    // ── 6. Clean up /tmp WebSocket conf files ──
-    foreach (glob('/tmp/wg_ws_tun_wg*.conf.php') ?: [] as $f) {
-        @unlink($f);
-        $nuke_log[] = "Deleted WS conf file: " . basename($f);
-    }
 
     // ── 7. Persist and reload ──
     write_config("WGX DEV: Full nuke — all tunnels, peers, firewall, NAT rules removed");
@@ -836,21 +511,6 @@ if ($_POST && isset($_POST['deploy_all'])) {
 
     // Append new tunnel
     $tunnels   = config_get_path('installedpackages/wireguard/tunnels/item', []);
-    // === WebSocket Transport (optional) ===
-    $ws_enabled      = isset($_POST['ws_enabled']) && $_POST['ws_enabled'] === '1';
-    $ws_remote_ip    = '127.0.0.1'; // Server runs on this pfSense box — always loopback
-    $ws_remote_port  = (int)($_POST['ws_remote_port'] ?? 443);
-    $ws_path         = trim($_POST['ws_path']         ?? '/tunnel');
-    $ws_tls          = isset($_POST['ws_tls']) && $_POST['ws_tls'] === '1';
-    $ws_reconnect    = max(1, (int)($_POST['ws_reconnect'] ?? 5));
-    $ws_hs_timeout   = max(5, (int)($_POST['ws_hs_timeout'] ?? 10));
-
-    // Sanitise: strip CR/LF to prevent header injection (mirrors wg_ws_core.php [SEC-1])
-    $ws_path = str_replace(["\r", "\n"], '', $ws_path);
-    if ($ws_path === '' || $ws_path[0] !== '/') {
-        $ws_path = '/tunnel';
-    }
-
     $tunnel_entry = [
         'name'       => $tun_iface,
         'enable'     => 'on',
@@ -862,37 +522,6 @@ if ($_POST && isset($_POST['deploy_all'])) {
         'addresses'  => ['row' => $address_items],
         'mtu'        => '1420',
     ];
-
-    if ($ws_enabled && !empty($ws_remote_ip)) {
-        $tunnel_entry['wgx_ws'] = [
-            'enabled'    => '1',
-            'remote_ip'  => $ws_remote_ip,
-            'remote_port' => (string)$ws_remote_port,
-            'ws_path'    => $ws_path,
-            'tls'        => $ws_tls ? '1' : '0',
-            'reconnect'  => (string)$ws_reconnect,
-            'hs_timeout' => (string)$ws_hs_timeout,
-        ];
-
-        // Write the generated config file for the daemon to read at startup
-        $ws_conf_path = "/tmp/wg_ws_{$tun_iface}.conf.php";
-        $ws_conf_content = "<?php\n" .
-        "\$local_wg_ip        = '127.0.0.1';\n" .
-        "\$local_wg_port      = {$wg_port};\n" .
-        "\$remote_server_ip   = " . var_export($ws_remote_ip, true) . ";\n" .
-        "\$remote_server_port = {$ws_remote_port};\n" .
-        "\$gateway_host       = " . var_export($ws_remote_ip, true) . ";\n" .
-        "\$ws_path            = " . var_export($ws_path, true) . ";\n" .
-        "\$use_tls            = " . ($ws_tls ? 'true' : 'false') . ";\n" .
-        "\$reconnect_delay    = {$ws_reconnect};\n" .
-        "\$handshake_timeout  = {$ws_hs_timeout};\n" .
-        "\$trusted_udp_ip     = '127.0.0.1';\n";
-        file_put_contents($ws_conf_path, $ws_conf_content);
-        chmod($ws_conf_path, 0600);
-
-        syslog(LOG_NOTICE, "WG Suite: WebSocket transport enabled for {$tun_iface} → {$ws_remote_ip}:{$ws_remote_port}");
-        wgx_audit_log("WebSocket transport enabled for tunnel {$tun_iface}");
-    }
 
     // Idempotency guard: if the same descr + listenport combination is
     // already in the tunnel list, don't append a second time. Protects
@@ -1155,54 +784,6 @@ if ($_POST && isset($_POST['deploy_all'])) {
     $v6_info  = !empty($wg_ip6) ? " | IPv6: {$wg_ip6}/{$wg_mask6}" : '';
     $savemsg  = "Deployment Complete! Interface {$tun_iface} created. IPv4: {$wg_ip}/{$wg_mask}{$v6_info}. Routing and NAT applied.{$ospf_msg}";
 
-    // === WebSocket server auto-deploy ===
-    if ($ws_enabled && isset($tunnel_entry['wgx_ws'])) {
-        // $ws_remote_ip is empty when running on-box — that is correct here.
-        // The "remote server" IS this pfSense box, so we deploy the server locally.
-        $webui_port    = !empty($_POST['ws_webui_port']) ? (int)$_POST['ws_webui_port'] : 8443;
-        wgx_step_start('ws', 'WebSocket Server Deployment');
-        $ws_deploy     = wgx_deploy_ws_server($wg_port, $webui_port, $tun_iface);
-        $ws_all_ok     = !in_array(false, array_column($ws_deploy, 'ok'), true);
-        if ($ws_all_ok) {
-            wgx_step_done('ws', 'server listening on 443');
-        } else {
-            wgx_step_fail('ws', 'see step details below');
-        }
-        $all_ok        = !in_array(false, array_column($ws_deploy, 'ok'), true);
-
-        // The deploy function already probed port 443 internally.
-        // This final check confirms it is still responding.
-        if ($all_ok) {
-            $probe_ok    = false;
-            $final_probe = @fsockopen('127.0.0.1', 443, $pe, $ps, 2);
-            if ($final_probe) { fclose($final_probe); $probe_ok = true; }
-            $ws_deploy[] = [
-                'ok'    => $probe_ok,
-                'label' => 'Final service probe',
-                'msg'   => $probe_ok
-                    ? "WebSocket server confirmed listening on port 443."
-                    : "Warning: server not responding on port 443. If port 443 is still used by the web GUI, go to System > Advanced > Admin Access and move it to port 8443, then re-run Setup.",
-            ];
-            $all_ok = $probe_ok;
-        }
-
-        $savemsg      .= $all_ok
-        ? " WebSocket server deployed and verified."
-        : " WebSocket server deployment had issues — see details below.";
-        // Store steps so the UI can render them
-        $ws_deploy_steps = $ws_deploy;
-    }
-
-    // ── Persist WS-deploy config mutations ─────────────────────────
-    // wgx_deploy_ws_server() modified system/webgui/port and filter/rule
-    // in memory but did NOT write_config, so those changes would be lost
-    // when the request ends. Save once here.
-    if ($ws_enabled) {
-        wgx_step_start('commit', 'Final Configuration Commit');
-        write_config('WG Suite: WebSocket transport deploy — persist port/rule changes');
-        wgx_step_done('commit');
-    }
-
     // ── Success — Post-Redirect-Get so a reload doesn't re-deploy ─
     // The rc.restart_webgui and any WS server start run in a shutdown
     // hook below, AFTER the response has been flushed to the browser —
@@ -1213,8 +794,7 @@ if ($_POST && isset($_POST['deploy_all'])) {
         // then PRG to prevent re-submit on refresh.
         if (session_status() !== PHP_SESSION_ACTIVE) { @session_start(); }
         $_SESSION['wgx_setup_result'] = [
-            'savemsg'         => $savemsg,
-            'ws_deploy_steps' => $ws_deploy_steps ?? [],
+            'savemsg' => $savemsg,
         ];
         // Fire-and-forget the slow stuff after we send the response.
         wgx_schedule_post_response_tasks();
@@ -1222,134 +802,17 @@ if ($_POST && isset($_POST['deploy_all'])) {
         // Streaming mode: tell the client we're done and where to go next.
         // No Location: header — the client navigates on receiving 'done'.
         if ($GLOBALS['wgx_stream_mode']) {
-            $stream_target = 'vpn_wg_setup.php?deployed=1';
-            $stream_port   = 0;
-            if (!empty($GLOBALS['wgx_webgui_restart_needed'])) {
-                $stream_port   = (int)($GLOBALS['wgx_new_webui_port'] ?? 8443);
-                $stream_target = '';  // client will build absolute URL from window.location
-            }
             wgx_stream_event('done', [
-                'navigate'    => $stream_target,
-                'port_change' => !empty($GLOBALS['wgx_webgui_restart_needed']),
-                'new_port'    => $stream_port,
+                'navigate'    => 'vpn_wg_setup.php?deployed=1',
+                'port_change' => false,
+                'new_port'    => 0,
                 'message'     => $savemsg,
             ]);
             exit;
         }
 
-        if (empty($GLOBALS['wgx_webgui_restart_needed'])) {
-            // Same-port deploy — normal PRG works.
-            header('Location: vpn_wg_setup.php?deployed=1');
-            exit;
-        }
-
-        // Port-change deploy: the browser can't follow a Location: back to
-        // the port it POSTed on because that port is about to die. Render a
-        // self-contained interstitial that polls the new port and hops the
-        // browser over as soon as it's up.
-        $new_port    = (int)($GLOBALS['wgx_new_webui_port'] ?? 8443);
-        $safe_msg    = htmlspecialchars($savemsg, ENT_QUOTES, 'UTF-8');
-        $steps_html  = '';
-        foreach (($ws_deploy_steps ?? []) as $st) {
-            $ok    = !empty($st['ok']);
-            $lbl   = htmlspecialchars((string)($st['label'] ?? ''), ENT_QUOTES, 'UTF-8');
-            $smsg  = htmlspecialchars((string)($st['msg']   ?? ''), ENT_QUOTES, 'UTF-8');
-            $icon  = $ok ? '&#x2713;' : '&#x2717;';
-            $color = $ok ? '#4caf50'  : '#e57373';
-            $steps_html .= "<li><span style=\"color:{$color};font-weight:600;\">{$icon}</span> "
-                        .  "<strong>{$lbl}</strong> &mdash; {$smsg}</li>";
-        }
-        header('Content-Type: text/html; charset=utf-8');
-        header('Cache-Control: no-store');
-        ?><!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>WG Suite &mdash; Deploy Complete</title>
-<style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-         background: #1e2836; color: #e5e9f0; margin: 0; padding: 40px 20px; }
-  .card { max-width: 640px; margin: 0 auto; background: #26334a;
-          border-radius: 8px; padding: 32px; box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
-  h1 { margin: 0 0 12px 0; font-size: 22px; color: #4caf50; }
-  h1 .check { display: inline-block; width: 28px; height: 28px; border-radius: 50%;
-              background: #4caf50; color: #fff; text-align: center; line-height: 28px;
-              font-weight: 700; margin-right: 8px; vertical-align: -4px; }
-  p  { line-height: 1.5; }
-  ul.steps { list-style: none; padding: 0; margin: 12px 0; font-size: 13px;
-             background: #1e2836; border-radius: 6px; padding: 12px 18px; }
-  ul.steps li { padding: 4px 0; }
-  .waiting { display: flex; align-items: center; gap: 14px; margin: 28px 0 20px;
-             padding: 16px 20px; background: #1e2836; border-left: 4px solid #ffb74d;
-             border-radius: 4px; }
-  .spinner { width: 22px; height: 22px; border: 3px solid rgba(255,255,255,0.15);
-             border-top-color: #ffb74d; border-radius: 50%;
-             animation: spin 0.9s linear infinite; flex-shrink: 0; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .waiting.up { border-left-color: #4caf50; }
-  .waiting.up .spinner { border-top-color: #4caf50; }
-  .cta { display: inline-block; margin-top: 8px; padding: 10px 22px;
-         background: #4caf50; color: #fff; text-decoration: none; border-radius: 4px;
-         font-weight: 600; }
-  .cta:hover { background: #43a047; }
-  .muted { color: #90a4ae; font-size: 13px; }
-  code { background: #1e2836; padding: 2px 6px; border-radius: 3px; }
-</style>
-</head>
-<body>
-<div class="card">
-  <h1><span class="check">&#x2713;</span> Tunnel deployed</h1>
-  <p><?= $safe_msg ?></p>
-  <?php if ($steps_html !== ''): ?>
-    <ul class="steps"><?= $steps_html ?></ul>
-  <?php endif; ?>
-  <div id="wgxWait" class="waiting">
-    <div class="spinner"></div>
-    <div>
-      <div id="wgxWaitMsg"><strong>Waiting for the pfSense web UI on port <?= $new_port ?>&hellip;</strong></div>
-      <div class="muted">This usually takes 5&ndash;15 seconds while nginx restarts.</div>
-    </div>
-  </div>
-  <p>If nothing happens automatically, click here:</p>
-  <p><a id="wgxGo" class="cta" href="#">Continue to pfSense on port <?= $new_port ?></a></p>
-  <p class="muted">The web UI has moved because the WebSocket server now owns port&nbsp;443. You can move it back in <code>System &gt; Advanced &gt; Admin Access</code> at any time.</p>
-</div>
-<script>
-(function() {
-    var newPort = <?= (int)$new_port ?>;
-    var target  = window.location.protocol + '//' + window.location.hostname +
-                  ':' + newPort + '/vpn_wg_setup.php?deployed=1';
-    document.getElementById('wgxGo').href = target;
-
-    var attempts = 0;
-    var maxAttempts = 120;   // 60 seconds at 500 ms
-    var startDelay  = 2500;  // give the shutdown handler a moment
-
-    function markUp() {
-        var wait = document.getElementById('wgxWait');
-        var msg  = document.getElementById('wgxWaitMsg');
-        if (wait) { wait.classList.add('up'); }
-        if (msg)  { msg.innerHTML = '<strong>Web UI is back up. Redirecting&hellip;</strong>'; }
-        setTimeout(function() { window.location.href = target; }, 250);
-    }
-
-    function poll() {
-        attempts++;
-        if (attempts > maxAttempts) { return; } // give up — fallback link stays
-
-        // fetch with no-cors: resolves the moment the new port answers, rejects
-        // while it's still down. We can't read the response and we don't need to.
-        fetch(target, { method: 'GET', mode: 'no-cors', cache: 'no-store',
-                        credentials: 'omit', redirect: 'manual' })
-            .then(function()  { markUp(); })
-            .catch(function() { setTimeout(poll, 500); });
-    }
-    setTimeout(poll, startDelay);
-})();
-</script>
-</body>
-</html>
-<?php
+        header('Location: vpn_wg_setup.php?deployed=1');
+        exit;
         exit;
     }
 }
@@ -1366,14 +829,12 @@ if (
     if (session_status() !== PHP_SESSION_ACTIVE) { @session_start(); }
     if (!empty($_SESSION['wgx_setup_result'])) {
         $savemsg         = (string)($_SESSION['wgx_setup_result']['savemsg']         ?? '');
-        $ws_deploy_steps = (array) ($_SESSION['wgx_setup_result']['ws_deploy_steps'] ?? []);
         unset($_SESSION['wgx_setup_result']);
     }
 }
 
 // ── Deferred post-response tasks ───────────────────────────────────────
-// The web-UI restart AND the WebSocket server startup poll (up to 8s)
-// happen here — AFTER the browser has the redirect. Uses
+// These happen AFTER the browser has the redirect. Uses
 // fastcgi_finish_request() when available; falls back to output-buffer
 // close + connection-close header so the client sees the response
 // immediately regardless of how PHP is fronted.
@@ -1389,10 +850,6 @@ function wgx_schedule_post_response_tasks(): void
             @header('Content-Length: ' . ob_get_length());
             while (ob_get_level() > 0) { @ob_end_flush(); }
             @flush();
-        }
-        // Now do the slow stuff without the browser waiting on us.
-        if (!empty($GLOBALS['wgx_webgui_restart_needed'])) {
-            @mwexec('/etc/rc.restart_webgui &');
         }
     });
 }
@@ -1431,20 +888,6 @@ if (isset($savemsg)) {
         . 'to provision peers for this tunnel.'
         . '</div>';
     }
-}
-if (isset($ws_deploy_steps)) {
-    echo '<div class="panel panel-default" style="margin-top:10px;">';
-    echo '<div class="panel-heading"><h3 class="panel-title"><i class="fa fa-plug"></i> WebSocket Server Deployment</h3></div>';
-    echo '<div class="panel-body"><ul class="list-group" style="margin-bottom:0;">';
-    foreach ($ws_deploy_steps as $s) {
-        $icon  = $s['ok'] ? 'fa-check text-success' : 'fa-times text-danger';
-        $label = htmlspecialchars($s['label']);
-        $msg   = $s['msg'];   // already safe — no user input reflected here
-        echo "<li class=\"list-group-item\">"
-        . "<i class=\"fa {$icon}\"></i>&nbsp; <strong>{$label}</strong>"
-        . " &mdash; {$msg}</li>";
-    }
-    echo '</ul></div></div>';
 }
 ?>
 
@@ -1520,13 +963,6 @@ value="<?= htmlspecialchars((string)$next_port) ?>" min="1" max="65535">
 <span class="help-block" id="wg_port_help">
 UDP port WireGuard listens on. Auto-incremented from existing tunnels.
 </span>
-<div id="wg_port_ws_notice" style="display:none; margin-top:6px;">
-<span class="label label-info"><i class="fa fa-plug"></i> WebSocket Transport Active</span>
-<span class="text-muted" style="font-size:12px; margin-left:6px;">
-WireGuard keeps its UDP port above for local bridging.
-Peers will connect via <strong>TCP 443</strong> through the WebSocket server — not directly to this port.
-</span>
-</div>
 </td>
 </tr>
 <tr>
@@ -1582,81 +1018,6 @@ Leave blank for IPv4-only. A <code>fd00::/8</code> ULA prefix is recommended.
 <span class="help-block">
 Requires the pfSense FRR package to be installed.
 </span>
-</td>
-</tr>
-<tr>
-<td>
-<strong>WebSocket Transport</strong>
-<span class="text-muted"> (Advanced)</span>
-</td>
-<td>
-<div class="checkbox" style="margin-bottom:8px;">
-<label>
-<input type="checkbox" name="ws_enabled" value="1" id="wsEnabledCheck"
-onchange="
-document.getElementById('wsTransportOptions').style.display  = this.checked ? '' : 'none';
-document.getElementById('wg_port_ws_notice').style.display   = this.checked ? '' : 'none';
-document.getElementById('wg_port_help').style.display        = this.checked ? 'none' : '';
-">
-<strong>Tunnel WireGuard UDP over WebSocket (port 443)</strong>
-</label>
-</div>
-<div id="wsTransportOptions" style="display:none;">
-<div class="row" style="margin-bottom:6px;">
-<div class="col-sm-3">
-<label class="control-label" style="font-weight:normal;">Port</label>
-<input type="number" class="form-control input-sm" name="ws_remote_port" value="443" min="1" max="65535">
-</div>
-<div class="col-sm-3">
-<label class="control-label" style="font-weight:normal;">WS Path</label>
-<input type="text" class="form-control input-sm" name="ws_path" value="/tunnel" placeholder="/tunnel">
-</div>
-</div>
-<div class="row" style="margin-bottom:6px;">
-<div class="col-sm-3">
-<label class="control-label" style="font-weight:normal;">Reconnect Delay (s)</label>
-<input type="number" class="form-control input-sm" name="ws_reconnect" value="5" min="1" max="300">
-</div>
-<div class="col-sm-3">
-<label class="control-label" style="font-weight:normal;">Handshake Timeout (s)</label>
-<input type="number" class="form-control input-sm" name="ws_hs_timeout" value="10" min="5" max="60">
-</div>
-<div class="col-sm-6" style="padding-top:22px;">
-<div class="checkbox" style="margin:0;">
-<label>
-<input type="checkbox" name="ws_tls" value="1" checked>
-<strong>Enable TLS</strong> (recommended — verifies server certificate)
-</label>
-</div>
-</div>
-</div>
-<span class="help-block">
-Wraps WireGuard UDP inside a WebSocket connection. Useful for networks that block UDP.
-The WebSocket server and firewall rule are configured automatically on deploy.
-</span>
-<?php
-// Only prompt to move the web UI when it's still on 443 (or unset — pfSense
-// treats an empty webgui port as 443). If a previous WebSocket deploy
-// already moved it (e.g. to 8443 or 64443), don't ask the user again;
-// the deploy handler is idempotent and skips the move anyway. Show a
-// short info line so the user knows what state the box is in.
-$wgx_cur_webui_port = (int)(config_get_path('system/webgui/port', '') ?: 443);
-if ($wgx_cur_webui_port === 443):
-?>
-<div class="row" style="margin-top:8px;">
-<div class="col-sm-3">
-<label class="control-label" style="font-weight:normal;">Move web UI to port</label>
-<input type="number" class="form-control input-sm" name="ws_webui_port" value="8443" min="1024" max="65535">
-<span class="help-block" style="font-size:11px;">Port 443 must be free for the WebSocket server. The web UI will move here.</span>
-</div>
-</div>
-<?php else: ?>
-<div style="margin-top:8px; padding:8px 12px; background:rgba(76,175,80,0.08); border-left:3px solid #4caf50; border-radius:2px; font-size:12px;">
-<i class="fa fa-check-circle" style="color:#4caf50;"></i>
-Web UI is already on port <strong><?= (int)$wgx_cur_webui_port ?></strong>, so port 443 is free for the WebSocket server. No move needed.
-</div>
-<?php endif; ?>
-</div>
 </td>
 </tr>
 </tbody>
@@ -1724,7 +1085,6 @@ Web UI is already on port <strong><?= (int)$wgx_cur_webui_port ?></strong>, so p
             if (!li) {
                 // WS-only steps are not in the initial list — append them.
                 var wsLabels = {
-                    ws:     'WebSocket Server Deployment',
                     commit: 'Final Configuration Commit'
                 };
                 if (!wsLabels[id]) { return; }
@@ -1885,32 +1245,9 @@ Web UI is already on port <strong><?= (int)$wgx_cur_webui_port ?></strong>, so p
                 });
             }
             // else: fall through, browser will submit the form normally
-            var hint = document.getElementById('wgxDeployHint');
-            var wsOn = document.getElementById('wsEnabledCheck');
-            if (hint && wsOn && wsOn.checked) {
-                hint.textContent = 'WebSocket deploy also moves the web UI off port 443. ' +
-                    'If the browser prompts about a new certificate after this, that is normal.';
-            }
         });
     }
 
-    var wsCheck = document.getElementById('wsEnabledCheck');
-    var portEl = document.getElementById('wg_port');
-    var notice = document.getElementById('wg_port_ws_notice');
-    var helpEl = document.getElementById('wg_port_help');
-
-    if (!wsCheck || !portEl) return;
-
-    wsCheck.addEventListener('change', function() {
-        if (this.checked) {
-            // Show the notice explaining peers connect via TCP 443
-            notice.style.display = '';
-    helpEl.style.display = 'none';
-        } else {
-            notice.style.display = 'none';
-    helpEl.style.display = '';
-        }
-    });
 })();
 </script>
 
