@@ -129,8 +129,12 @@ function wgx_get_tunnels(): array
  */
 function wgx_configure_cron(bool $enable): void
 {
+    // Path note: this script lives in /usr/local/pkg, NOT under /usr/local/www.
+    // It is a privileged maintenance job with no guiconfig.inc auth guard, so
+    // anything under the web root would be runnable by any unauthenticated
+    // caller who can reach the WebGUI.
     install_cron_job(
-        '/usr/local/bin/php -q /usr/local/www/wgx/wgx_expire.php',
+        '/usr/local/bin/php -q /usr/local/pkg/wgx_expire.php',
         $enable,
         '*/5', '*', '*', '*', '*',
         'root'
@@ -151,6 +155,11 @@ function wgx_install(): void
     if (!is_dir(WGX_DIR)) {
         mkdir(WGX_DIR, 0755, true);
     }
+
+    // Drop any cron entry left by upstream 1.1.0, which ran the job from the
+    // web root. install_cron_job() matches on the command string, so the old
+    // path has to be removed explicitly or both entries would run.
+    install_cron_job('/usr/local/bin/php -q /usr/local/www/wgx/wgx_expire.php', false);
 
     // Register cron job
     wgx_configure_cron(true);
