@@ -1,0 +1,35 @@
+/*
+ * wgx_credits.css
+ * WG Suite - Credits Page Styles
+ * Part of pfSense WG Suite Package
+ */
+
+.credit-card {
+    border-left: 4px solid #337ab7;
+    background: rgba(128, 128, 128, 0.05);
+    padding: 15px;
+    margin-bottom: 15px;
+    border-radius: 4px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.credit-title {
+    margin-top: 0;
+    color: #337ab7;
+    font-weight: bold;
+}
+
+.icon-gold {
+    color: #f0ad4e;
+}
+
+/* Contextual left-border variants — use framework-consistent colours.
+ *  These match Bootstrap 3 contextual colours so they sit correctly in
+ *  both the light and dark pfSense themes. */
+.credit-card-success {
+    border-left-color: #5cb85c;
+}
+
+.credit-card-danger {
+    border-left-color: #d9534f;
+}

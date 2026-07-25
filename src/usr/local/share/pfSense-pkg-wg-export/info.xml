@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<pfsensepkgs>
+	<package>
+		<name>wg-export</name>
+		<pkginfolink>https://github.com/3um3le3ee/pfSense-wireguard-peer-export</pkginfolink>
+		<descr><![CDATA[WireGuard Provisioning Suite — Peer export, QR codes, GPS tracking, telemetry dashboard and map.]]></descr>
+		<website>https://github.com/3um3le3ee/pfSense-wireguard-peer-export</website>
+		<version>1.2.0</version>
+		<configurationfile>wgexport.xml</configurationfile>
+	</package>
+</pfsensepkgs>

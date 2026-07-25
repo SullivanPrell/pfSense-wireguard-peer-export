@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE packagegui SYSTEM "../schema/packages.dtd">
+<?xml-stylesheet type="text/xsl" href="../xsl/package.xsl"?>
+<packagegui>
+    <copyright>
+        <![CDATA[
+/*
+ * wgexport.xml
+ *
+ * WG Suite - WireGuard Provisioning Package for pfSense
+ * Copyright (c) 2026 3um3le3ee <3um3le3ee@mail.com>
+ * All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+        ]]>
+    </copyright>
+    <name>wg-export</name>
+    <title>VPN: WG Suite</title>
+    <version>1.1.0</version>
+    <pkgversion>1.1.0</pkgversion>
+    <category>VPN</category>
+    <pkginfolink>https://github.com/3um3le3ee/pfSense-wireguard-peer-export</pkginfolink>
+    <!-- WireGuard dependency — CE uses pfSense-pkg-WireGuard, Plus has it built-in.
+    Removing this hard dependency prevents install failure on pfSense Plus. -->
+    <include_file>/usr/local/pkg/wgexport.inc</include_file>
+    <privileges>
+        <item>
+            <name>page-vpn-wgsuite-dashboard</name>
+            <descr>Allow access to WG Suite NOC Dashboard</descr>
+            <match>wgx/vpn_wg_dashboard.php*</match>
+        </item>
+        <item>
+            <name>page-vpn-wgsuite-export</name>
+            <descr>Allow access to WG Suite Export &amp; Provisioning</descr>
+            <match>wgx/vpn_wg_export.php*</match>
+        </item>
+        <item>
+            <name>page-vpn-wgsuite-setup</name>
+            <descr>Allow access to WG Suite Setup Wizard</descr>
+            <match>wgx/vpn_wg_setup.php*</match>
+        </item>
+        <item>
+            <name>page-vpn-wgsuite-audit</name>
+            <descr>Allow access to WG Suite Audit Logs</descr>
+            <match>wgx/vpn_wg_audit.php*</match>
+        </item>
+        <item>
+            <name>page-vpn-wgsuite-credits</name>
+            <descr>Allow access to WG Suite Credits</descr>
+            <match>wgx/vpn_wg_credits.php*</match>
+        </item>
+        <item>
+            <name>page-vpn-wgsuite-map</name>
+            <descr>Allow access to WG Suite World Map</descr>
+            <match>wgx/vpn_wg_map.php*</match>
+        </item>
+        <item>
+            <name>page-vpn-wgsuite-checkin</name>
+            <descr>Allow GPS check-in (no auth — token protected)</descr>
+            <match>wgx/vpn_wg_checkin.php*</match>
+        </item>
+    </privileges>
+    <menu>
+        <name>WG Suite</name>
+        <tooltiptext>WireGuard Enterprise Provisioning and Export Suite</tooltiptext>
+        <section>VPN</section>
+        <url>/wgx/vpn_wg_export.php</url>
+    </menu>
+    <custom_php_install_command>
+        <![CDATA[wgx_install();]]>
+    </custom_php_install_command>
+    <custom_php_deinstall_command>
+        <![CDATA[wgx_deinstall();]]>
+    </custom_php_deinstall_command>
+</packagegui>

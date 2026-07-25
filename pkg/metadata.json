@@ -1,0 +1,14 @@
+{
+  "name": "pfSense-pkg-wg-export",
+  "version": "1.1.0",
+  "origin": "net-vpn/pfSense-pkg-wg-export",
+  "comment": "WireGuard Provisioning Suite (hardened fork)",
+  "desc": "WireGuard Setup Wizard and Peer Export Tool for pfSense.\n\nHardened community fork. See SECURITY.md for the audit that motivated\nthe changes and for what was removed relative to upstream 1.1.0.",
+  "maintainer": "sullivan.prell@proton.me",
+  "www": "https://github.com/SullivanPrell/pfSense-wireguard-peer-export",
+  "abi": "*",
+  "arch": "*",
+  "prefix": "/",
+  "licenselogic": "single",
+  "licenses": ["APACHE20"]
+}

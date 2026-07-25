@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<packagegui>
+    <menu>
+        <name>WG Suite</name>
+        <tooltiptext>WireGuard Enterprise Provisioning and Export Suite</tooltiptext>
+        <section>VPN</section>
+        <url>/wgx/vpn_wg_export.php</url>
+        <icon>fa-shield</icon>
+    </menu>
+</packagegui>

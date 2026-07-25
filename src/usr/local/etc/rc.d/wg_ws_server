@@ -1,0 +1,117 @@
+#!/bin/sh
+# /usr/local/etc/rc.d/wg_ws_server
+# rc.d service script for the WireGuard WebSocket bridge server.
+#
+# Install:
+#   cp wg_ws_server_rc.sh /usr/local/etc/rc.d/wg_ws_server
+#   chmod +x /usr/local/etc/rc.d/wg_ws_server
+#
+# Enable at boot (add to /etc/rc.conf.local):
+#   wg_ws_server_enable="YES"
+#
+# Manual control:
+#   service wg_ws_server start
+#   service wg_ws_server stop
+#   service wg_ws_server status
+#   service wg_ws_server restart
+
+# PROVIDE: wg_ws_server
+# REQUIRE: wireguard LOGIN
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="wg_ws_server"
+rcvar="${name}_enable"
+
+# Defaults — override in /etc/rc.conf.local
+: ${wg_ws_server_enable:="NO"}
+: ${wg_ws_server_cert:="/usr/local/etc/wg_ws/server.pem"}
+: ${wg_ws_server_port:="443"}
+: ${wg_ws_server_path:="/tunnel"}
+: ${wg_ws_server_wg_port:="51820"}
+: ${wg_ws_server_log:="/var/log/wg_ws_server.log"}
+
+command="/usr/local/bin/php"
+command_args="/usr/local/www/wgx/tunnel/wg_ws_server.php"
+pidfile="/var/run/${name}.pid"
+
+start_cmd="${name}_start"
+stop_cmd="${name}_stop"
+status_cmd="${name}_status"
+
+wg_ws_server_start()
+{
+    if [ -f "${pidfile}" ] && kill -0 $(cat "${pidfile}") 2>/dev/null; then
+        echo "${name} is already running (pid $(cat ${pidfile}))."
+        return 1
+    fi
+
+    if [ ! -f "${wg_ws_server_cert}" ]; then
+        echo "ERROR: Certificate not found: ${wg_ws_server_cert}"
+        echo "       Run the cert-export command from Step 2 in the docs first."
+        return 1
+    fi
+
+    echo "Starting ${name}..."
+
+    # Export config as environment variables the server reads
+    export WG_WS_CERT="${wg_ws_server_cert}"
+    export WG_WS_PORT="${wg_ws_server_port}"
+    export WG_WS_PATH="${wg_ws_server_path}"
+    export WG_WG_PORT="${wg_ws_server_wg_port}"
+
+    # Launch in background, capture PID, redirect output to log
+    /usr/local/bin/php ${command_args} >> "${wg_ws_server_log}" 2>&1 &
+    echo $! > "${pidfile}"
+
+    echo "${name} started (pid $(cat ${pidfile})), logging to ${wg_ws_server_log}"
+}
+
+wg_ws_server_stop()
+{
+    if [ ! -f "${pidfile}" ]; then
+        echo "${name} is not running (no pidfile)."
+        return 0
+    fi
+
+    pid=$(cat "${pidfile}")
+    if ! kill -0 "${pid}" 2>/dev/null; then
+        echo "${name} is not running (stale pidfile — removing)."
+        rm -f "${pidfile}"
+        return 0
+    fi
+
+    echo "Stopping ${name} (pid ${pid})..."
+    kill -TERM "${pid}"
+
+    # Wait up to 5 seconds for clean shutdown
+    i=0
+    while kill -0 "${pid}" 2>/dev/null && [ $i -lt 10 ]; do
+        sleep 0.5
+        i=$((i + 1))
+    done
+
+    if kill -0 "${pid}" 2>/dev/null; then
+        echo "Process did not exit cleanly — sending SIGKILL."
+        kill -KILL "${pid}"
+    fi
+
+    rm -f "${pidfile}"
+    echo "${name} stopped."
+}
+
+wg_ws_server_status()
+{
+    if [ -f "${pidfile}" ] && kill -0 $(cat "${pidfile}") 2>/dev/null; then
+        echo "${name} is running (pid $(cat ${pidfile}))."
+        echo "Log: ${wg_ws_server_log}"
+        echo "Last 5 log lines:"
+        tail -5 "${wg_ws_server_log}" 2>/dev/null || echo "  (log empty)"
+    else
+        echo "${name} is NOT running."
+    fi
+}
+
+load_rc_config $name
+run_rc_command "$1"
