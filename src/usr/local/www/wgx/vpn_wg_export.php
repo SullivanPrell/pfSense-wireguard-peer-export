@@ -1053,32 +1053,6 @@ function wgx_valid_tunnel_names()
     return array_filter($names);
 }
 
-/**
- * Builds the launcher scripts, setup assistant, and README for a
- * WireGuard WebSocket peer bundle. Returns an array with keys:
- * start_sh, setup_sh, start_bat, readme.
- */
-
-
-function wgx_get_ws_tunnels(): array
-{
-    $ws = [];
-    foreach (wgx_get_config_array("tunnel") as $t) {
-        if (is_array($t) && !empty($t["wgx_ws"]["enabled"])) {
-            $ws[$t["name"]] = $t["wgx_ws"];
-        }
-    }
-    return $ws;
-}
-
-/**
- * Returns true if the named tunnel has WebSocket transport enabled.
- */
-function wgx_tunnel_is_ws(string $tun_name): bool
-{
-    return array_key_exists($tun_name, wgx_get_ws_tunnels());
-}
-
 // ════════════════════════════════════════════════════════════════════════
 // PEER CONNECTIVITY DOCTOR
 // Walks a peer through the full connectivity chain — config, kernel, port,
@@ -1479,28 +1453,6 @@ function wgx_doctor_run(int $idx, string $wg_bin): array
                     "Path MTU {$path_mtu} is below tunnel MTU {$tun_mtu} + 60 overhead — large packets will blackhole (pages half-load, SSH hangs).",
                     "Lower the tunnel MTU to {$sug_mtu} and set MSS clamping to {$sug_mss} on the tunnel interface.");
             }
-        }
-    }
-
-    // ── 12. WS listener (WS tunnels only) ───────────────────────────────
-    $ws_tuns = wgx_get_ws_tunnels();
-    if (array_key_exists($tun_name, $ws_tuns)) {
-        $ws_port = (int)($ws_tuns[$tun_name]["remote_port"] ?? 443);
-        [$wk_rc, $wk_out] = wgx_doctor_exec("sockstat -4 -6 -l 2>/dev/null");
-        $ws_bound = false;
-        foreach ((array)$wk_out as $wl) {
-            if (stripos($wl, "tcp") !== false && preg_match('/[:.]' . $ws_port . '(\s|$)/', $wl)) {
-                $ws_bound = true;
-                break;
-            }
-        }
-        if ($ws_bound) {
-            $checks[] = wgx_doctor_check("ws_listener", "WebSocket transport", "pass",
-                "TCP {$ws_port} has a local listener for the WS tunnel.");
-        } else {
-            $checks[] = wgx_doctor_check("ws_listener", "WebSocket transport", "warn",
-                "No local TCP listener on {$ws_port} — fine if a proxy/relay terminates WS in front, otherwise WS clients cannot connect.",
-                "Check that wg_ws_server is running, or verify the fronting proxy forwards TCP {$ws_port}.");
         }
     }
 
@@ -1998,100 +1950,6 @@ if (php_sapi_name() === "cli" || empty($_SERVER["REMOTE_ADDR"])) {
 if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["action"])) {
     // Buffer output from here so all handlers can safely call header()
     ob_start();
-
-    // === Standalone: migrate_peer_to_ws ===
-    // Moves an existing peer from a standard tunnel to a WebSocket-enabled tunnel.
-    // Creates a new peer entry on the WS tunnel with the same keys/IPs, removes the
-    // old entry, and returns the updated conf text with the TCP endpoint.
-    if (
-        $_SERVER["REQUEST_METHOD"] === "POST" &&
-        ($_POST["action"] ?? "") === "migrate_peer_to_ws"
-    ) {
-        if (!csrf_check(false)) {
-            header("Content-Type: application/json");
-            echo json_encode(["success" => false, "message" => "CSRF failed."]);
-            exit();
-        }
-
-        $src_idx  = (int)($_POST["src_idx"]  ?? -1);
-        $dst_tun  = trim($_POST["dst_tun"]   ?? "");
-
-        $a_peers  = wgx_get_config_array("peer");
-        $ws_tuns  = wgx_get_ws_tunnels();
-
-        if ($src_idx < 0 || !isset($a_peers[$src_idx])) {
-            header("Content-Type: application/json");
-            echo json_encode(["success" => false, "message" => "Peer not found."]);
-            exit();
-        }
-        if (!array_key_exists($dst_tun, $ws_tuns)) {
-            header("Content-Type: application/json");
-            echo json_encode(["success" => false, "message" => "Target tunnel is not a WebSocket tunnel."]);
-            exit();
-        }
-
-        $src_peer = $a_peers[$src_idx];
-
-        // Check the destination tunnel doesn't already have this public key
-        foreach ($a_peers as $i => $p) {
-            if ($i === $src_idx) continue;
-            if (($p["tun"] ?? "") === $dst_tun && ($p["publickey"] ?? "") === ($src_peer["publickey"] ?? "")) {
-                header("Content-Type: application/json");
-                echo json_encode(["success" => false, "message" => "Peer already exists on the target WS tunnel."]);
-                exit();
-            }
-        }
-
-        // Build the migrated peer — same as source but on the new tunnel,
-        // with wgx_ws_transport flag set so conf export uses TCP endpoint
-        $migrated = $src_peer;
-        $migrated["tun"]              = $dst_tun;
-        $migrated["wgx_ws_transport"] = "1";
-        unset($migrated["wgx_ws_override"]); // clear any per-peer override from old tunnel
-
-        // Remove source peer, append migrated peer
-        unset($a_peers[$src_idx]);
-        $a_peers   = array_values($a_peers);
-        $a_peers[] = $migrated;
-        $new_idx   = count($a_peers) - 1;
-
-        config_set_path("installedpackages/wireguard/peers/item", $a_peers);
-        write_config("WG Suite: Migrated peer '{$src_peer["descr"]}' to WebSocket tunnel {$dst_tun}");
-        syslog(LOG_NOTICE, "WG Suite: Peer '{$src_peer["descr"]}' migrated to WS tunnel {$dst_tun}");
-        wgx_audit_log("Migrated peer '{$src_peer["descr"]}' to WebSocket tunnel {$dst_tun}");
-
-        // Purge the peer from the old tunnel's kernel state, then fully
-        // sync BOTH tunnels so the move takes effect immediately
-        // (wg_resync alone only rewrites the .conf files on disk).
-        if (!empty($src_peer["tun"]) && !empty($src_peer["publickey"])) {
-            wgx_wg_exec($wg_bin, ["set", $src_peer["tun"], "peer", $src_peer["publickey"], "remove"]);
-        }
-        wgx_kernel_sync([$src_peer["tun"] ?? "", $dst_tun]);
-
-        // Build the new conf with WS endpoint so the admin can send it to the peer
-        $a_tunnels = wgx_get_config_array("tunnel");
-        $dst_tun_obj = null;
-        foreach ($a_tunnels as $t) {
-            if (is_array($t) && ($t["name"] ?? "") === $dst_tun) {
-                $dst_tun_obj = $t;
-                break;
-            }
-        }
-        $ws_cfg     = $ws_tuns[$dst_tun];
-        $wan_ip     = wgx_best_endpoint($dst_tun_obj);
-        $ws_port    = $ws_cfg["remote_port"] ?? "443";
-        $new_endpoint = "{$wan_ip}:{$ws_port}";
-
-        header("Content-Type: application/json");
-        echo json_encode([
-            "success"      => true,
-            "message"      => "Peer migrated to {$dst_tun} (WebSocket). Send the new config to the peer device.",
-            "new_idx"      => $new_idx,
-            "new_endpoint" => $new_endpoint,
-            "new_tun"      => $dst_tun,
-        ]);
-        exit();
-    }
 
     // === Standalone: save_peer_tags ===
     if (
@@ -3606,22 +3464,6 @@ Here is your WireGuard VPN configuration for: {$peer_name}
                 exit();
             }
 
-            // === Per-peer WebSocket override (optional) ===
-            $peer_ws_override = [];
-            $peer_ws_remote_ip   = str_replace(["\r", "\n"], '', trim($_POST["peer_ws_remote_ip"]   ?? ""));
-            $peer_ws_remote_port = (int)($_POST["peer_ws_remote_port"] ?? 443);
-            $peer_ws_path        = str_replace(["\r", "\n"], '', trim($_POST["peer_ws_path"]        ?? ""));
-            if (!empty($peer_ws_remote_ip)) {
-                if ($peer_ws_path === "" || $peer_ws_path[0] !== "/") {
-                    $peer_ws_path = "/tunnel";
-                }
-                $peer_ws_override = [
-                    "remote_ip"   => $peer_ws_remote_ip,
-                    "remote_port" => (string)$peer_ws_remote_port,
-                    "ws_path"     => $peer_ws_path,
-                ];
-            }
-
             $new_peer = [
                 "enabled" => "yes",
                 "tun" => $tun_name,
@@ -3663,19 +3505,6 @@ Here is your WireGuard VPN configuration for: {$peer_name}
             $new_peer["wgx_quota_exempt"] = $peer_quota_exempt;
             $new_peer["wgx_quota_limit_gb"] =
                 $peer_quota_limit > 0 ? (string) $peer_quota_limit : "0";
-
-            if (!empty($peer_ws_override)) {
-                $new_peer["wgx_ws_override"] = $peer_ws_override;
-            }
-
-            // Mark the peer as WebSocket transport if the target tunnel is a
-            // WS tunnel, or the admin explicitly chose WebSocket transport.
-            // This flag is what makes the export modal return TCP 443 as the
-            // endpoint instead of the WireGuard UDP port.
-            $peer_transport = trim($_POST["transport"] ?? "standard");
-            if ($peer_transport === "websocket" || wgx_tunnel_is_ws($tun_name)) {
-                $new_peer["wgx_ws_transport"] = "1";
-            }
 
             // Store peer email if provided — used to pre-fill email modal
             $peer_email = trim($_POST["peer_email"] ?? "");
@@ -4141,19 +3970,12 @@ Here is your WireGuard VPN configuration for: {$peer_name}
             }
 
             // Resolve the endpoint clients will actually use.
-            // For WebSocket tunnels use TCP 443, not the WireGuard UDP port.
             $verify_endpoint = "";
-            $ws_tuns_check   = wgx_get_ws_tunnels();
             foreach (wgx_get_config_array("tunnel") as $vt) {
                 if (is_array($vt) && ($vt["name"] ?? "") === $tun_name) {
                     $wan_ip = wgx_best_endpoint($vt);
-                    if (array_key_exists($tun_name, $ws_tuns_check)) {
-                        $ws_port         = $ws_tuns_check[$tun_name]["remote_port"] ?? "443";
-                        $verify_endpoint = "{$wan_ip}:{$ws_port} (TCP — WebSocket transport)";
-                    } else {
-                        $verify_endpoint = $wan_ip . ":" .
-                            ($vt["listenport"] ?? ($listen_port ?: "51820"));
-                    }
+                    $verify_endpoint = $wan_ip . ":" .
+                        ($vt["listenport"] ?? ($listen_port ?: "51820"));
                     break;
                 }
             }
@@ -4604,28 +4426,9 @@ if ($_SERVER["REQUEST_METHOD"] === "GET" && isset($_GET["action"])) {
                 exit();
             }
 
-            // If this peer is on a WebSocket tunnel, override the endpoint
-            // to show the TCP address (WAN IP : WS port) rather than the
-            // raw WireGuard UDP port. The peer device connects via TCP 443.
-            $ws_tuns       = wgx_get_ws_tunnels();
-            $peer_tun_name = $peer["tun"] ?? "";
-            $is_ws_peer    = !empty($peer["wgx_ws_transport"]) || array_key_exists($peer_tun_name, $ws_tuns);
-            $ws_cfg        = $ws_tuns[$peer_tun_name] ?? [];
-            $wan_ip        = wgx_best_endpoint($server_tun);
-
-            if ($is_ws_peer && !empty($ws_cfg)) {
-                $ws_port     = $ws_cfg["remote_port"] ?? "443";
-                $wg_udp_port = $server_tun["listenport"] ?? "51820";
-                // The peer's WireGuard Endpoint must point to their LOCAL
-                // wg_client_tunnel daemon (127.0.0.1:<wg_port>), not directly
-                // to the pfSense server. wg_client_tunnel.php runs on the peer
-                // device and wraps the UDP traffic in WebSocket frames.
-                $default_ep  = "127.0.0.1:{$wg_udp_port}";
-            } else {
-                $ws_port     = "443";
-                $wan_ip_ep   = $wan_ip . ":" . ($server_tun["listenport"] ?? "51820");
-                $default_ep  = $wan_ip_ep;
-            }
+            // Peers connect straight to the tunnel's WireGuard UDP listener.
+            $wan_ip     = wgx_best_endpoint($server_tun);
+            $default_ep = $wan_ip . ":" . ($server_tun["listenport"] ?? "51820");
 
             $resp = [
                 "template"          => wgx_build_conf_template($peer, $server_tun),
@@ -4640,11 +4443,6 @@ if ($_SERVER["REQUEST_METHOD"] === "GET" && isset($_GET["action"])) {
                 "peer_schedule"     => $peer["wgx_schedule"] ?? "always",
                 "peer_autorotate"   => $peer["wgx_autorotate"] ?? "0",
                 "peer_pubkey"       => $peer["publickey"] ?? "",
-                "ws_transport"      => $is_ws_peer,
-                "ws_server_ip"      => $is_ws_peer ? $wan_ip : "",
-                "ws_server_port"    => $is_ws_peer ? ($ws_cfg["remote_port"] ?? "443") : "",
-                "ws_path"           => $is_ws_peer ? ($ws_cfg["ws_path"] ?? "/tunnel") : "",
-                "ws_tun_name"       => $is_ws_peer ? $peer_tun_name : "",
                 "peer_email"        => $peer["wgx_email"] ?? "",
                 "peer_notes"        => $peer["wgx_notes"] ?? "",
                 "peer_dns_override"  => $peer["wgx_dns_override"] ?? "",
@@ -5272,7 +5070,6 @@ if (
 }
 
 $wgx_settings  = wgx_load_settings();
-$wgx_ws_tunnels = wgx_get_ws_tunnels();  // ['tun_wg1' => [...ws config...], ...]
 $local_interfaces = get_configured_interface_with_descr();
 ?>
 
@@ -5830,20 +5627,6 @@ then come back here to provision peers.
                                     <button class="btn btn-xs btn-default" onclick="pingPeer(<?= json_encode(implode(',', $ip_parts)) ?>, <?= $json_name ?>, this)" title="Ping Peer"><i class="fa fa-wifi"></i></button>
                                     <button class="btn btn-xs btn-default" onclick="wgxOpenDoctor(<?= $idx ?>, <?= $json_name ?>)" title="Connectivity Doctor"><i class="fa fa-stethoscope"></i></button>
                                     <button class="btn btn-xs btn-danger" onclick="deletePeer(<?= $idx ?>, <?= $json_name ?>)" title="Delete Peer"><i class="fa fa-trash"></i></button>
-                                        <?php
-                                        // Show migrate button only for peers NOT already on a WS tunnel
-                                        $peer_on_ws = !empty($peer["wgx_ws_transport"]) || array_key_exists($peer["tun"] ?? "", $wgx_ws_tunnels);
-                                        if (!$peer_on_ws && !empty($wgx_ws_tunnels)):
-                                            $ws_tun_options = htmlspecialchars(json_encode(array_keys($wgx_ws_tunnels)), ENT_QUOTES, 'UTF-8');
-                                        ?>
-                                            <button class="btn btn-xs btn-success"
-                                                onclick="openMigrateModal(<?= $idx ?>, <?= $json_name ?>, <?= $ws_tun_options ?>)"
-                                                title="Migrate to WebSocket Transport">
-                                                <i class="fa fa-exchange"></i>
-                                            </button>
-                                        <?php elseif ($peer_on_ws): ?>
-                                            <span class="label label-info" style="font-size:10px;" title="This peer uses WebSocket transport"><i class="fa fa-plug"></i> WS</span>
-                                        <?php endif; ?>
                                     </td>
                                 </tr>
                         <?php
@@ -6535,17 +6318,6 @@ tr[class^='treegrid-parent-'] {
                     <i class="fa fa-info-circle"></i>
                     Requires SMTP configured under <strong>System &rarr; Advanced &rarr; Notifications</strong>.
                 </div>
-                <div id="emailWsNotice" style="display:none;" class="alert alert-warning">
-                    <i class="fa fa-exclamation-triangle"></i> <strong>WebSocket Transport Peer — Email Not Available</strong><br><br>
-                    pfSense's built-in email system does not support file attachments, so the peer bundle cannot be sent directly from WG Suite.<br><br>
-                    <strong>To distribute this peer's configuration:</strong>
-                    <ol style="margin:8px 0 0 0; padding-left:18px;">
-                        <li>Click <strong>Cancel</strong> to close this modal.</li>
-                        <li>Click the <strong><i class="fa fa-qrcode"></i> Export Config</strong> button on the peer's row.</li>
-                        <li>Click <strong>Download Peer Bundle (.tar.gz)</strong> to save the bundle to your device.</li>
-                        <li>Email the bundle to the peer using your own email client (Outlook, Gmail, etc).</li>
-                    </ol>
-                </div>
                 <div class="panel panel-default">
                     <div class="panel-heading">
                         <h3 class="panel-title"><i class="fa fa-paper-plane-o"></i> Delivery Details</h3>
@@ -6563,7 +6335,6 @@ tr[class^='treegrid-parent-'] {
                 <input type="hidden" id="emailConfData">
                 <input type="hidden" id="emailPeerName">
                 <input type="hidden" id="emailPeerIdx">
-                <input type="hidden" id="emailIsWs" value="0">
             </div>
             <div class="modal-footer">
                 <button class="btn btn-default" data-dismiss="modal">Cancel</button>
@@ -6702,7 +6473,7 @@ tr[class^='treegrid-parent-'] {
                             </label>
                             <div class="col-sm-9">
                                 <input id="peerEmail" type="email" class="form-control" placeholder="peer@example.com">
-                                <span class="help-block" style="margin-bottom:0;">Pre-fills the email field when sending the configuration. Required for WebSocket peers to receive their bundle by email.</span>
+                                <span class="help-block" style="margin-bottom:0;">Pre-fills the email field when sending the configuration.</span>
                             </div>
                         </div>
                         <div class="form-group">
@@ -6915,36 +6686,6 @@ tr[class^='treegrid-parent-'] {
                                 <input id="peerKeepAlive" type="number" class="form-control" placeholder="25" value="25" oninput="updateDisplays()">
                             </div>
                         </div>
-                        <div class="form-group">
-                            <label class="col-sm-3 control-label">WebSocket Override
-                                <span class="text-muted" style="font-weight:normal;font-size:11px;"><br>(per-peer)</span>
-                            </label>
-                            <div class="col-sm-9">
-                                <div class="checkbox" style="margin-top:0; margin-bottom:6px;">
-                                    <label>
-                                        <input type="checkbox" id="peerWsOverride" onchange="document.getElementById('peerWsOverrideFields').style.display=this.checked?'':'none';">
-                                        Override tunnel-level WebSocket server for this peer
-                                    </label>
-                                </div>
-                                <div id="peerWsOverrideFields" style="display:none;">
-                                    <div class="row">
-                                        <div class="col-sm-7">
-                                            <input type="text" id="peerWsRemoteIp" class="form-control input-sm" placeholder="Remote server IP (e.g. 203.0.113.51)">
-                                        </div>
-                                        <div class="col-sm-2">
-                                            <input type="number" id="peerWsRemotePort" class="form-control input-sm" placeholder="Port" value="443" min="1" max="65535">
-                                        </div>
-                                        <div class="col-sm-3">
-                                            <input type="text" id="peerWsPath" class="form-control input-sm" placeholder="/tunnel">
-                                        </div>
-                                    </div>
-                                    <span class="help-block" style="margin-top:4px; font-size:11px;">
-                                        Only set this if this peer needs a different WebSocket server than the tunnel default.
-                                        Leave blank to inherit the tunnel-level setting.
-                                    </span>
-                                </div>
-                            </div>
-                        </div>
                     </div>
                 </div>
 
@@ -7009,38 +6750,6 @@ tr[class^='treegrid-parent-'] {
             <div class="modal-footer">
                 <button type="button" class="btn btn-sm btn-default" id="doctorRerun"><i class="fa fa-refresh"></i> Run again</button>
                 <button type="button" class="btn btn-sm btn-primary" data-dismiss="modal">Close</button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<div class="modal fade" id="migrateModal" tabindex="-1" role="dialog" data-backdrop="static">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <button class="close" data-dismiss="modal"><span>&times;</span></button>
-                <h4 class="modal-title"><i class="fa fa-exchange"></i> Migrate Peer to WebSocket Transport</h4>
-            </div>
-            <div class="modal-body">
-                <div class="alert alert-info">
-                    <i class="fa fa-info-circle"></i>
-                    This moves <strong id="migratePeerName"></strong> from its current standard WireGuard
-                    tunnel to a WebSocket-enabled tunnel. Keys, IP assignment and settings are preserved.
-                    The peer device will need a new config — the endpoint will become your WAN IP on TCP 443.
-                </div>
-                <div class="form-group">
-                    <label class="control-label">Target WebSocket Tunnel</label>
-                    <select id="migrateTunSelect" class="form-control"></select>
-                </div>
-                <div id="migrateResult" style="display:none;">
-                    <span id="migrateResultText"></span>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-default" data-dismiss="modal">Cancel</button>
-                <button class="btn btn-success" id="btnConfirmMigrate" onclick="confirmMigrate()">
-                    <i class="fa fa-exchange"></i> Migrate
-                </button>
             </div>
         </div>
     </div>
@@ -7214,10 +6923,6 @@ tr[class^='treegrid-parent-'] {
 <script>
     const tunnelsData = <?= json_encode(
                             $tunnels_json,
-                            JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP
-                        ) ?>;
-    const wsTunnels = <?= json_encode(
-                            array_keys($wgx_ws_tunnels),
                             JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP
                         ) ?>;
     const dynamicSplit = "<?= htmlspecialchars(
@@ -8143,36 +7848,22 @@ tr[class^='treegrid-parent-'] {
             emailField.value = storedEmail;
             if (prefillNote) prefillNote.style.display = storedEmail ? '' : 'none';
 
-            // Show/hide WS bundle notice
-            var wsNotice = document.getElementById('emailWsNotice');
-            var isWs = data.ws_transport && data.ws_server_ip;
-            document.getElementById('emailIsWs').value = isWs ? '1' : '0';
-            if (wsNotice) wsNotice.style.display = isWs ? '' : 'none';
-
-            // For WS peers hide the email field and send button — attachments not supported
+            // Every peer uses standard UDP transport, so the SMTP path is always
+            // available. This used to branch on a WebSocket flag that hid the
+            // send button; with WS transport gone there is nothing to hide.
             var emailFieldRow = document.getElementById('emailTarget') ? document.getElementById('emailTarget').closest('.form-group') : null;
             var smtpNotice = document.getElementById('emailSmtpNotice');
             var sendBtn = document.getElementById('btnSendMail');
             var dlConfBtn = document.getElementById('btnDownloadConf');
-            if (isWs) {
-                if (emailFieldRow) emailFieldRow.style.display = 'none';
-                if (smtpNotice) smtpNotice.style.display = 'none';
-                if (sendBtn) sendBtn.style.display = 'none';
-                if (dlConfBtn) {
-                    dlConfBtn.style.display = '';
-                    dlConfBtn.innerHTML = '<i class="fa fa-download"></i> Download Bundle to Email Manually';
-                }
-            } else {
-                if (emailFieldRow) emailFieldRow.style.display = '';
-                if (smtpNotice) smtpNotice.style.display = '';
-                if (dlConfBtn) {
-                    dlConfBtn.style.display = '';
-                    dlConfBtn.innerHTML = '<i class="fa fa-download"></i> Download .conf to Email Manually';
-                }
-                if (sendBtn) {
-                    sendBtn.style.display = '';
-                    sendBtn.innerHTML = '<i class="fa fa-paper-plane"></i> Send via pfSense SMTP';
-                }
+            if (emailFieldRow) emailFieldRow.style.display = '';
+            if (smtpNotice) smtpNotice.style.display = '';
+            if (dlConfBtn) {
+                dlConfBtn.style.display = '';
+                dlConfBtn.innerHTML = '<i class="fa fa-download"></i> Download .conf to Email Manually';
+            }
+            if (sendBtn) {
+                sendBtn.style.display = '';
+                sendBtn.innerHTML = '<i class="fa fa-paper-plane"></i> Send via pfSense SMTP';
             }
 
             let conf = data.template;
@@ -9029,73 +8720,6 @@ tr[class^='treegrid-parent-'] {
         URL.revokeObjectURL(a.href);
     }
 
-
-    // ── Migrate to WebSocket modal ────────────────────────────────────────────
-    var migrateCurrentIdx = null;
-    var migrateCurrentName = null;
-
-    function openMigrateModal(idx, name, wsTunList) {
-        migrateCurrentIdx = idx;
-        migrateCurrentName = name;
-        var tunList = Array.isArray(wsTunList) ? wsTunList : [wsTunList];
-        document.getElementById('migratePeerName').textContent = name;
-        var sel = document.getElementById('migrateTunSelect');
-        sel.innerHTML = '';
-        tunList.forEach(function(t) {
-            var o = document.createElement('option');
-            o.value = t;
-            o.textContent = t;
-            sel.appendChild(o);
-        });
-        document.getElementById('migrateResult').style.display = 'none';
-        document.getElementById('migrateResultText').textContent = '';
-        document.getElementById('btnConfirmMigrate').disabled = false;
-        document.getElementById('btnConfirmMigrate').innerHTML = '<i class="fa fa-exchange"></i> Migrate';
-        $('#migrateModal').modal('show');
-    }
-
-    function confirmMigrate() {
-        var btn = document.getElementById('btnConfirmMigrate');
-        var result = document.getElementById('migrateResult');
-        var text = document.getElementById('migrateResultText');
-        var dstTun = document.getElementById('migrateTunSelect').value;
-        btn.disabled = true;
-        btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Migrating...';
-        var body = new URLSearchParams({
-            action: 'migrate_peer_to_ws',
-            src_idx: migrateCurrentIdx,
-            dst_tun: dstTun,
-            __csrf_magic: getCsrf()
-        });
-        fetch('/wgx/vpn_wg_export.php', {
-                method: 'POST',
-                body: body
-            })
-            .then(function(r) {
-                return r.json();
-            })
-            .then(function(data) {
-                result.className = 'alert ' + (data.success ? 'alert-success' : 'alert-danger');
-                text.textContent = data.message || (data.success ? 'Migrated.' : 'Failed.');
-                result.style.display = '';
-                btn.innerHTML = '<i class="fa fa-exchange"></i> Migrate';
-                if (data.success) {
-                    btn.disabled = true;
-                    setTimeout(function() {
-                        location.reload();
-                    }, 1800);
-                } else {
-                    btn.disabled = false;
-                }
-            })
-            .catch(function() {
-                result.className = 'alert alert-danger';
-                text.textContent = 'Request failed.';
-                result.style.display = '';
-                btn.disabled = false;
-                btn.innerHTML = '<i class="fa fa-exchange"></i> Migrate';
-            });
-    }
 
             // ── Duplicate peer name check ────────────────────────────────────────────
     function checkDuplicateName(val) {
