@@ -1,5 +1,7 @@
 # pfSense WireGuard Peer Export (WG Suite) — hardened fork
 
+[![ci](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+
 > **This is a fork of [3um3le3ee/pfSense-wireguard-peer-export](https://github.com/3um3le3ee/pfSense-wireguard-peer-export), rebuilt from source with security fixes.**
 >
 > Upstream ships compiled `.pkg` binaries with the source deleted from the
@@ -25,7 +27,11 @@ Adding a WireGuard peer on pfSense normally means: create the peer in the GUI, m
 
 ---
 
-## What's New in v1.1.0
+## What's New
+
+The features below arrived in upstream 1.1.0 and are retained in this fork.
+For what this fork *changed*, see the [changelog](#changelog) and
+[SECURITY.md](SECURITY.md).
 
 ### 🩺 Peer Connectivity Doctor
 A per-peer diagnostic engine that walks the full connectivity chain and reports each link as pass / warn / fail with a concrete fix. Click the stethoscope icon on any peer row to run it. Checks, in causal order:
@@ -136,17 +142,40 @@ Previous versions computed IP capacity and usage incorrectly: `used_ips` increme
 
 ## 🚀 Quick Start
 
-### Build from source
+Two ways in. Both end at the same `.pkg`; they differ only in how much you
+take on trust.
 
-This fork does not publish binaries. You build the package yourself from the
-source in `src/`, so what you install is what you can read. `build.py` uses
-only the Python standard library, so this works on macOS and Linux as well as
-FreeBSD.
+### Option A — install the release
+
+Download `pfSense-pkg-wg-export-2.0.0.pkg` from
+[Releases](../../releases/latest), then:
+
+```bash
+scp pfSense-pkg-wg-export-2.0.0.pkg root@192.168.1.1:/tmp/
+```
+
+SSH into pfSense (option 8 for a shell) and install it:
+
+```bash
+pkg add -fM /tmp/pfSense-pkg-wg-export-2.0.0.pkg
+```
+
+Every release is built by [a GitHub Action](.github/workflows/release.yml) that
+runs the full test suite, builds twice to confirm the output is reproducible,
+and refuses to publish if it is not. The `sha256` is in the release notes.
+
+### Option B — build it yourself
+
+Nothing here requires the release. `build.py` uses only the Python standard
+library, so this works on macOS and Linux as well as FreeBSD.
 
 **1. Build the package**
 ```bash
 make build
 ```
+
+This prints the `sha256`. Builds are byte-reproducible, so it should match the
+hash in the release notes exactly — that is the check that makes Option A safe.
 
 **2. Confirm the package matches the source tree**
 ```bash
@@ -162,19 +191,16 @@ This syntax-checks every file, proves no code calls a function this fork
 removed, and executes all five WebGUI pages against a stub pfSense to compare
 their output against upstream. It runs off-box — no firewall needed.
 
-**4. Copy it to the firewall**
-```bash
-scp dist/pfSense-pkg-wg-export-1.1.0.pkg root@192.168.1.1:/tmp/
-```
+**4. Copy it to the firewall and install**, as in Option A.
 
-**5. Install it** — SSH into pfSense (option 8 for a shell) and run:
-```bash
-pkg add -fM /tmp/pfSense-pkg-wg-export-1.1.0.pkg
-```
+### Checking a download without building
 
-Builds are byte-reproducible, so two people building the same commit get the
-same `sha256`. Check yours against anyone else's before trusting a package you
-did not build.
+To check a `.pkg` you downloaded against this repository — comparing every
+packaged file, not just one hash:
+
+```bash
+python3 build.py --verify /path/to/pfSense-pkg-wg-export-2.0.0.pkg
+```
 
 ### Uninstall
 
@@ -277,7 +303,30 @@ The peer list shows tunnel, public key, allowed IPs, live status, and Rx/Tx usag
 
 ## Changelog
 
-### v1.1.0
+### v2.0.0 — first release of this fork
+
+Based on upstream 1.1.0. The major version marks a deliberate break: features
+were **removed**, so this is not a drop-in continuation of upstream's 1.x line.
+Full detail in [SECURITY.md](SECURITY.md).
+
+- **REMOVED** GPS check-in tracker and peer location map — an unauthenticated
+  endpoint gated only on a token passed in the URL query string, recording peer
+  coordinates to disk, plus geolocation lookups over plaintext HTTP.
+- **REMOVED** WebSocket-to-WireGuard bridge — ran as root, bound `0.0.0.0:443`,
+  and enabled authentication only via an environment variable the shipped
+  `rc.d` script never set. Its remnants in the export page went in a second
+  pass, including a form field whose value was stored and never read.
+- **CHANGED** The privileged cron script moved back out of the web root.
+  Upstream 1.1.0 published it under `/usr/local/www/`, where it was reachable
+  over HTTP without an authentication guard.
+- **ADDED** Readable source, a deterministic builder, and an off-box test
+  harness (`make test`) that runs both against the upstream package this fork
+  descends from, so regressions are visible rather than inferred.
+- **ADDED** `audit.sh` now detects the 1.0.8/1.0.9 boot-persistence backdoor,
+  and its line endings were fixed — upstream shipped it with CRLF, which meant
+  it could never run on FreeBSD at all.
+
+### v1.1.0 *(upstream — inherited by this fork)*
 
 #### Peer & Tunnel Management
 - **NEW** Peer Connectivity Doctor — 12-check per-peer diagnostic (config → kernel → port → WAN rule → tunnel firewall rule → NAT → handshake → traffic symmetry → addressing → path-MTU → WS listener) with a plain-English result and concrete fix for each link. The tunnel firewall check specifically detects the protocol/TCP-flags trap that silently drops all non-TCP peer traffic.

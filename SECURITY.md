@@ -199,12 +199,21 @@ POST handlers or prove behaviour on FreeBSD.
 Upstream shipped a mix of `0600`, `0644` and `0711` — build-box artifacts;
 this fork uses `0644` for data and `0755` for executables.
 
-Anyone can confirm a published `.pkg` matches this repository:
+This matters because releases publish a binary. A binary you cannot check is
+exactly the upstream problem this fork exists to answer, so the check has to be
+something a reader can actually run:
 
 ```sh
-make build
-python3 build.py --verify dist/pfSense-pkg-wg-export-1.1.0.pkg
+make build                                                    # prints the sha256
+python3 build.py --verify /path/to/downloaded.pkg             # compares every file
 ```
+
+`make build` on any machine, from the tag a release was built at, must print
+the `sha256` in that release's notes. If it does not, the published binary was
+not built from the published source — do not install it.
+
+The release workflow builds twice and refuses to publish if the two builds
+disagree, so a non-reproducible build fails loudly instead of shipping.
 
 ---
 
