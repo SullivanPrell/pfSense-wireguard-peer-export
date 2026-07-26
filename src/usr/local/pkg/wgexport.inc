@@ -32,7 +32,7 @@ require_once("config.inc");
 require_once("util.inc");
 require_once("pfsense-utils.inc");
 
-define('WGX_VERSION',  '1.2.0');
+define('WGX_VERSION',  '2.0.0');
 define('WGX_PKG_NAME', 'pfSense-pkg-wg-export');
 define('WGX_DIR',      '/usr/local/www/wgx');
 define('WGX_DB_DIR',   '/var/db');

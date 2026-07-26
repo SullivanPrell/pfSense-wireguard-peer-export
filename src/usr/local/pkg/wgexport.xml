@@ -27,8 +27,8 @@
     </copyright>
     <name>wg-export</name>
     <title>VPN: WG Suite</title>
-    <version>1.1.0</version>
-    <pkgversion>1.1.0</pkgversion>
+    <version>2.0.0</version>
+    <pkgversion>2.0.0</pkgversion>
     <category>VPN</category>
     <pkginfolink>https://github.com/3um3le3ee/pfSense-wireguard-peer-export</pkginfolink>
     <!-- WireGuard dependency — CE uses pfSense-pkg-WireGuard, Plus has it built-in.
