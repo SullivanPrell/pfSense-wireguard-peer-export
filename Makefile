@@ -9,7 +9,7 @@ PKG         := dist/$(PKG_NAME)-$(PKG_VERSION).pkg
 
 BASE_VERSION := 1.1.0
 
-.PHONY: all build list verify check lint clean help
+.PHONY: all build list verify check lint callgraph render test clean help
 
 all: build
 
@@ -39,6 +39,23 @@ lint:
 	done; \
 	if [ $$fail -eq 0 ]; then echo "all PHP files parse cleanly"; fi; \
 	exit $$fail
+
+## callgraph: prove no call site references a function this fork removed (needs php)
+callgraph:
+	@command -v php >/dev/null || { echo "php not installed; skipping"; exit 0; }
+	@base=$$(python3 tools/extract-upstream.py $(BASE_VERSION)); \
+	python3 tools/callgraph.py src "$$base"; \
+	rc=$$?; rm -rf "$$base"; exit $$rc
+
+## render: execute every page against a stub pfSense, diff output vs upstream (needs php)
+render:
+	@command -v php >/dev/null || { echo "php not installed; skipping"; exit 0; }
+	@base=$$(python3 tools/extract-upstream.py $(BASE_VERSION)); \
+	python3 tools/render-check/drive.py src "$$base"; \
+	rc=$$?; rm -rf "$$base"; exit $$rc
+
+## test: run every check — lint, structure, call graph, render
+test: lint check callgraph render
 
 ## clean: remove build output
 clean:
