@@ -1,0 +1,138 @@
+# Build and publish a release when a v* tag is pushed.
+#
+# The published .pkg is only worth as much as your ability to check it, so the
+# release notes carry the sha256 and the two commands needed to reproduce it.
+# Because build.py is deterministic, a rebuild from the same tag on any machine
+# must produce the same hash — if it does not, do not install the download.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish (e.g. v2.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Ensure php and python3
+        run: |
+          if ! command -v php >/dev/null; then
+            echo "php not present on the runner image; installing php-cli"
+            sudo apt-get update -qq && sudo apt-get install -y -qq php-cli
+          fi
+          command -v php >/dev/null     || { echo "::error::php is required"; exit 1; }
+          command -v python3 >/dev/null || { echo "::error::python3 is required"; exit 1; }
+
+      # A tag that disagrees with pkg/metadata.json would publish an asset
+      # whose filename and internal version do not match the release it hangs
+      # under. Fail before anything is built.
+      - name: Tag must match pkg/metadata.json
+        id: version
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          meta=$(python3 -c "import json;print(json.load(open('pkg/metadata.json'))['version'])")
+          echo "tag=$tag  metadata=$meta"
+          if [ "$tag" != "v$meta" ]; then
+            echo "::error::tag $tag does not match pkg/metadata.json version $meta (expected v$meta)"
+            exit 1
+          fi
+          echo "version=$meta" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag"      >> "$GITHUB_OUTPUT"
+
+      - name: Lint, structure, call graph, render
+        run: make test
+
+      - name: Build
+        run: make build
+
+      - name: Verify the package matches src/
+        run: make verify
+
+      - name: Reproducible build
+        id: build
+        run: |
+          first=$(sha256sum dist/*.pkg | cut -d' ' -f1)
+          make clean
+          make build
+          second=$(sha256sum dist/*.pkg | cut -d' ' -f1)
+          if [ "$first" != "$second" ]; then
+            echo "::error::build is not reproducible; refusing to publish"
+            exit 1
+          fi
+          echo "sha256=$first" >> "$GITHUB_OUTPUT"
+
+      - name: Checksum file
+        working-directory: dist
+        run: sha256sum *.pkg > SHA256SUMS
+
+      - name: Release notes
+        run: |
+          v="${{ steps.version.outputs.version }}"
+          sha="${{ steps.build.outputs.sha256 }}"
+          cat > notes.md <<EOF
+          Hardened community fork of the pfSense WireGuard Provisioning Suite.
+          See [SECURITY.md](SECURITY.md) for the audit behind the changes.
+
+          ## Verify before installing
+
+          \`\`\`
+          $sha  pfSense-pkg-wg-export-$v.pkg
+          \`\`\`
+
+          This build is reproducible, so you do not have to take the download on
+          trust. Rebuild it and compare the hash \`make build\` prints — if it
+          differs from the one above, do not install the download.
+
+          \`\`\`sh
+          git clone https://github.com/${{ github.repository }}
+          cd $(basename ${{ github.repository }})
+          git checkout ${{ steps.version.outputs.tag }}
+          make build
+          \`\`\`
+
+          Or check the file you downloaded directly against this repository,
+          which compares every packaged file rather than one hash:
+
+          \`\`\`sh
+          python3 build.py --verify /path/to/pfSense-pkg-wg-export-$v.pkg
+          \`\`\`
+
+          ## Install
+
+          \`\`\`sh
+          scp pfSense-pkg-wg-export-$v.pkg root@your-firewall:/tmp/
+          ssh root@your-firewall pkg add -fM /tmp/pfSense-pkg-wg-export-$v.pkg
+          \`\`\`
+
+          ## If you ever installed upstream 1.0.8 or 1.0.9
+
+          Those releases write a root command into \`config.xml\` that reinstalls
+          a package from a third-party URL at every boot, and it survives pfSense
+          upgrades. Installing this fork does **not** remove it. Run \`sh audit.sh\`
+          on the firewall to check.
+          EOF
+          cat notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            dist/pfSense-pkg-wg-export-${{ steps.version.outputs.version }}.pkg \
+            dist/SHA256SUMS \
+            --title "${{ steps.version.outputs.tag }}" \
+            --notes-file notes.md \
+            --verify-tag

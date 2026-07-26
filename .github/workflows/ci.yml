@@ -1,0 +1,63 @@
+# Checks on every push and pull request.
+#
+# Third-party actions are deliberately avoided; the only action used is the
+# official actions/checkout, pinned to a commit SHA rather than a tag, because
+# a tag can be moved to point at different code after review.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # The Makefile's php-dependent targets skip themselves when php is
+      # missing so a contributor without php can still build. In CI that would
+      # turn a missing interpreter into a silent pass, so make sure it is here.
+      # Only core php is needed — the harness uses the tokenizer and json only.
+      - name: Ensure php and python3
+        run: |
+          if ! command -v php >/dev/null; then
+            echo "php not present on the runner image; installing php-cli"
+            sudo apt-get update -qq && sudo apt-get install -y -qq php-cli
+          fi
+          command -v php >/dev/null     || { echo "::error::php is required for the CI checks"; exit 1; }
+          command -v python3 >/dev/null || { echo "::error::python3 is required"; exit 1; }
+          php --version
+          python3 --version
+
+      - name: Lint, structure, call graph, render
+        run: make test
+
+      - name: Build
+        run: make build
+
+      - name: Verify the package matches src/
+        run: make verify
+
+      # The fork's central claim is that anyone can rebuild the published
+      # binary and get the same bytes. Prove it on every run rather than
+      # asserting it in the README.
+      - name: Reproducible build
+        run: |
+          first=$(sha256sum dist/*.pkg | cut -d' ' -f1)
+          make clean
+          make build
+          second=$(sha256sum dist/*.pkg | cut -d' ' -f1)
+          echo "build 1: $first"
+          echo "build 2: $second"
+          if [ "$first" != "$second" ]; then
+            echo "::error::build is not reproducible"
+            exit 1
+          fi
+          echo "reproducible: identical sha256"
