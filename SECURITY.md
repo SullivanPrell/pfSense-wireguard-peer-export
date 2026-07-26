@@ -155,9 +155,44 @@ matching client sets `verify_peer => false`. Disabled by default upstream
 with `===`, which short-circuits on the first differing byte, while
 `vpn_wg_checkin.php` uses `hash_equals()` for the same value.
 
+### 3.6 WebSocket remnants in the export page
+
+**Severity: low.** Removing the WebSocket daemon (3.4) initially left its
+consumers in `vpn_wg_export.php` on the grounds that they were unreachable.
+They were unreachable, but not inert: the Add Peer form still rendered a
+"WebSocket Override" field whose value was parsed from `$_POST` and stored on
+the peer where nothing read it, and the create-peer handler still honoured
+`$_POST["transport"]`, so a hand-crafted POST could flag a peer as WebSocket
+transport and thereby disable the UI's ability to email that peer's config.
+The generated `.conf` was never affected — the endpoint-substitution branch
+also required a WebSocket tunnel config, which can no longer exist. Removed
+along with the migrate-to-WebSocket handler, modal and JavaScript.
+
 ---
 
-## 4. Reproducible builds
+## 4. Verification
+
+`php -l` proves a file parses; it cannot see a call to a deleted function or a
+stale variable inside a `<?= ?>` tag, both of which are fatals on first page
+load. Two comparative checks run the fork against the upstream package it
+descends from, so only regressions introduced here are reported:
+
+```sh
+make test      # lint, structure, call graph, render
+```
+
+`make callgraph` walks both trees with PHP's own lexer and reports any
+function the fork calls but no longer defines. `make render` executes all five
+WebGUI pages against a stub pfSense and diffs fatals, runtime diagnostics and
+HTML tag balance against upstream. Both need `php` but not pfSense; neither
+writes config or runs commands.
+
+This is not a substitute for testing on a real firewall — it does not exercise
+POST handlers or prove behaviour on FreeBSD.
+
+---
+
+## 5. Reproducible builds
 
 `build.py` produces byte-identical output from identical source: fixed mtimes
 (`SOURCE_DATE_EPOCH`, default 0), uid/gid 0, and normalised file modes.
@@ -173,7 +208,7 @@ python3 build.py --verify dist/pfSense-pkg-wg-export-1.1.0.pkg
 
 ---
 
-## 5. Scope and limits of this audit
+## 6. Scope and limits of this audit
 
 Static analysis only; nothing was run on a live firewall. Coverage was focused
 on the classes most likely to matter — install-time scripts, authentication

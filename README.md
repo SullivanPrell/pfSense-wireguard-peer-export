@@ -153,12 +153,21 @@ make build
 make verify
 ```
 
-**3. Copy it to the firewall**
+**3. Run the checks** (optional, needs `php`)
+```bash
+make test
+```
+
+This syntax-checks every file, proves no code calls a function this fork
+removed, and executes all five WebGUI pages against a stub pfSense to compare
+their output against upstream. It runs off-box — no firewall needed.
+
+**4. Copy it to the firewall**
 ```bash
 scp dist/pfSense-pkg-wg-export-1.1.0.pkg root@192.168.1.1:/tmp/
 ```
 
-**4. Install it** — SSH into pfSense (option 8 for a shell) and run:
+**5. Install it** — SSH into pfSense (option 8 for a shell) and run:
 ```bash
 pkg add -fM /tmp/pfSense-pkg-wg-export-1.1.0.pkg
 ```
